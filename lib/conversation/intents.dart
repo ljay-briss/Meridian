@@ -115,6 +115,21 @@ class StoryChipOption implements ReplyOption {
   String? toneHint(RelationshipState rel) => null;
 }
 
+/// The player asking Mama for a specific dollar amount — see
+/// CareerController.resolveMoneyAsk. Unlike [IntentChip]/[StoryChipOption],
+/// tapping this doesn't send a reply by itself: relationships_screen.dart's
+/// reply-tray tap handler opens a number-entry dialog instead, and the reply
+/// only goes out once the player types an amount and confirms.
+class MoneyAskChipOption implements ReplyOption {
+  const MoneyAskChipOption();
+
+  @override
+  String displayLabel(RelationshipState rel, TimeOfDay tod) => '(Ask for Money)';
+
+  @override
+  String? toneHint(RelationshipState rel) => null;
+}
+
 // Named top-level adapters, not lambdas — a lambda literal isn't a constant
 // expression in Dart, and kIntentChips (below) is a const list, so each
 // chip's toneHint has to be a plain function reference.
@@ -144,36 +159,82 @@ const List<IntentChip> kIntentChips = [
     primaryTopics: {},
     primaryIntent: Intent.statement,
     intensity: 0.4,
-    // Most of these stay untagged/topic-agnostic on purpose — this chip has
-    // to fit whatever the live thread is actually about, not one specific
-    // subject. But untagged-only meant tapping it while the thread was on a
-    // real subject (e.g. Topic.plans right after "Started something new,
-    // still figuring it out.") sent a content-free placeholder instead of
-    // anything that actually addressed what was asked. The topic-tagged
-    // lines below fix that: topicMatch() gives a matching-topic line a 16x
-    // weight boost over the untagged ones, so pickLine() favors them
-    // whenever the thread is actually on that subject, while the untagged
-    // lines remain the fallback for topics with no specific line yet.
+    // Every phrasing here is topic-tagged and actually says something — no
+    // untagged/content-free filler. This chip means "explain what's live";
+    // see [ConversationIntent.deflect] ("Not Right Now") for the player
+    // declining to. pickLine()'s topic-tiering (see its doc comment in
+    // dialogue_engine.dart) means the tag on each line below is now a hard
+    // requirement, not just a weight boost — so this pool needs at least one
+    // real line per [Topic] that can plausibly be the live thread when this
+    // chip is offered, or tapping it on that topic would come back empty and
+    // fall through to a DIFFERENT topic's line, which is its own kind of
+    // non-sequitur. Keep that coverage in mind before removing a line here.
     phrasings: [
-      DialogueLine('Let me explain.', tone: ReplyTone.honest),
-      DialogueLine("It's kind of a long story, but okay.", tone: ReplyTone.honest),
-      DialogueLine("Here's the thing —", tone: ReplyTone.honest),
-      DialogueLine("Alright, I'll tell you more about it.", tone: ReplyTone.warm),
-      DialogueLine('Honestly, there\'s more to it than that.', tone: ReplyTone.honest),
-      DialogueLine("I don't really want to get into it right now.", tone: ReplyTone.vague),
-      // Topic.plans — the "new job"/vague-plans follow-up.
-      DialogueLine("It's mostly driving and running errands for now. Still getting the hang of it.", tone: ReplyTone.vague, topic: Topic.plans),
+      // Topic.plans — the "new job"/vague-plans follow-up. The first one
+      // establishes ConversationFact 'coverJob' = 'driving' (Phase 6) — a
+      // representative example of the mechanism, not a full pass over every
+      // line here; see kPersonalReactions['mama'][ReplyTone.honest]'s PLANS
+      // section in data.dart for the matching requiredFacts-gated line.
+      DialogueLine(
+        "It's mostly driving and running errands for now. Still getting the hang of it.",
+        tone: ReplyTone.vague,
+        topic: Topic.plans,
+        establishesFacts: {'coverJob': 'driving'},
+      ),
       DialogueLine("Nothing's really set in stone yet — still figuring out the details myself.", tone: ReplyTone.vague, topic: Topic.plans),
       DialogueLine("It pays better than the last thing. That's really all I can say right now.", tone: ReplyTone.honest, topic: Topic.plans),
+      // Establishes 'coverJob' = 'restaurant' — deliberately conflicts with
+      // the 'driving' phrasing above (Phase 8's ContradictionEvent example),
+      // since pickLine() can land on either one turn to turn.
+      DialogueLine(
+        "Actually, it's changed — I'm working at a restaurant now.",
+        tone: ReplyTone.honest,
+        topic: Topic.plans,
+        establishesFacts: {'coverJob': 'restaurant'},
+      ),
       // Topic.wellbeing — "you okay?" follow-ups that were left vague.
       DialogueLine("I'm managing, Mamá. Just a lot going on that I can't fully get into.", tone: ReplyTone.vague, topic: Topic.wellbeing),
-      DialogueLine("Some days are harder than others, but I'm handling it.", tone: ReplyTone.honest, topic: Topic.wellbeing),
+      DialogueLine("It's just been a lot to carry, and I didn't want to worry you with the details.", tone: ReplyTone.honest, topic: Topic.wellbeing),
+      // Topic.goodNews — actually saying what the good news was, distinct
+      // from Topic.wellbeing above: that's a hardship/check-in register,
+      // this is a positive-update one.
+      DialogueLine("Okay — I actually pulled something off today. Feels good to say out loud.", tone: ReplyTone.warm, topic: Topic.goodNews),
+      DialogueLine("It's nothing huge, Mamá, but it actually went the way I wanted for once.", tone: ReplyTone.warm, topic: Topic.goodNews),
+      DialogueLine("I don't know why it feels weird to say, but yeah — it actually worked out.", tone: ReplyTone.honest, topic: Topic.goodNews),
       // Topic.suspicion — when she's pushing on something that felt off.
       DialogueLine("It's nothing you need to worry about, I promise.", tone: ReplyTone.vague, topic: Topic.suspicion),
       DialogueLine("I know how it looks. It's not as bad as you're imagining.", tone: ReplyTone.honest, topic: Topic.suspicion),
       // Topic.money — follow-ups on a money comment that was left hanging.
       DialogueLine("Money's actually been a little better lately. That's the short version.", tone: ReplyTone.honest, topic: Topic.money),
       DialogueLine("I'd rather not get into the specifics, but it's under control.", tone: ReplyTone.vague, topic: Topic.money),
+      // Topic.family — a real answer once she's actually pushed on family.
+      DialogueLine("Tono and I talked. It's fine now, we worked it out.", tone: ReplyTone.honest, topic: Topic.family),
+      DialogueLine("I've just been avoiding tía's calls. It's not serious.", tone: ReplyTone.vague, topic: Topic.family),
+      // Topic.health — filling in a health mention that was left vague.
+      DialogueLine("It's nothing major, just been run down lately.", tone: ReplyTone.vague, topic: Topic.health),
+      DialogueLine("The doctor said it's mostly stress. I'm handling it.", tone: ReplyTone.honest, topic: Topic.health),
+      // Topic.affection — actually saying more once she's pushed past a deflection.
+      DialogueLine("I don't say it enough, but I do think about you a lot.", tone: ReplyTone.warm, topic: Topic.affection),
+      DialogueLine("It's hard to put into words, but I care more than I show.", tone: ReplyTone.warm, topic: Topic.affection),
+    ],
+  ),
+  IntentChip(
+    intent: ConversationIntent.deflect,
+    label: 'Not Right Now',
+    primaryTone: ReplyTone.vague,
+    primaryTopics: {},
+    primaryIntent: Intent.dismissal,
+    intensity: 0.3,
+    // Only offered once a thread actually exists — declining to elaborate
+    // makes no sense as an opener. Deliberately topic-agnostic: the whole
+    // point of this chip is not naming what's being avoided, so unlike
+    // [ConversationIntent.elaborate] it doesn't need per-[Topic] coverage.
+    requiresThread: true,
+    phrasings: [
+      DialogueLine("I don't really want to get into it right now.", tone: ReplyTone.vague),
+      DialogueLine("Can we just leave it for now?", tone: ReplyTone.vague),
+      DialogueLine("Not really something I want to talk about right now.", tone: ReplyTone.vague),
+      DialogueLine("I'd rather not get into that today.", tone: ReplyTone.vague),
     ],
   ),
 
@@ -189,7 +250,6 @@ const List<IntentChip> kIntentChips = [
     phrasings: [
       DialogueLine('Morning, Mama.', tone: ReplyTone.warm, topic: Topic.greeting, timesOfDay: {TimeOfDay.morning}),
       DialogueLine('Hey Mama.', tone: ReplyTone.warm, topic: Topic.greeting),
-      DialogueLine('There you are.', tone: ReplyTone.warm, topic: Topic.greeting),
       DialogueLine('Hey, you.', tone: ReplyTone.warm, topic: Topic.greeting),
       DialogueLine("How you doing?", tone: ReplyTone.honest, topic: Topic.wellbeing, intent: Intent.question),
       DialogueLine("What's good?", tone: ReplyTone.vague, topic: Topic.greeting),

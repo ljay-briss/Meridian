@@ -11,6 +11,10 @@ DialogueContext _ctx({
   int daysSinceReply = 0,
   List<ReplyTone> recentTones = const [],
   List<MemoryEvent> memories = const [],
+  Map<String, ConversationFact> facts = const {},
+  double honesty = 50,
+  double reliability = 50,
+  double responsiveness = 50,
 }) =>
     DialogueContext(
       mood: mood,
@@ -20,6 +24,10 @@ DialogueContext _ctx({
       daysSinceReply: daysSinceReply,
       recentTones: recentTones,
       memories: memories,
+      facts: facts,
+      honesty: honesty,
+      reliability: reliability,
+      responsiveness: responsiveness,
     );
 
 void main() {
@@ -64,9 +72,9 @@ void main() {
       expect(pickLine(rng, pool, _ctx(suspicion: 90), currentDay: 1)!.text, 'accuses');
     });
 
-    test('requiredMemories gates eligibility on presence of any listed kind', () {
+    test('anyRequiredMemories gates eligibility on presence of any listed kind', () {
       final rng = Random(7);
-      final pool = [const DialogueLine('remembers', requiredMemories: {MemoryKind.cutOff})];
+      final pool = [const DialogueLine('remembers', anyRequiredMemories: {MemoryKind.cutOff})];
       expect(pickLine(rng, pool, _ctx(), currentDay: 1), isNull);
       final withMemory = _ctx(memories: [const MemoryEvent(MemoryKind.cutOff, 1)]);
       expect(pickLine(rng, pool, withMemory, currentDay: 1)!.text, 'remembers');
@@ -78,6 +86,39 @@ void main() {
       expect(pickLine(rng, pool, _ctx(), currentDay: 1)!.text, 'fresh_take');
       final withMemory = _ctx(memories: [const MemoryEvent(MemoryKind.cutOff, 1)]);
       expect(pickLine(rng, pool, withMemory, currentDay: 1), isNull);
+    });
+
+    test('requiredFacts gates eligibility, and requires EVERY listed key to match (AND, unlike anyRequiredMemories)', () {
+      final rng = Random(20);
+      final pool = [const DialogueLine('knows_both', requiredFacts: {'brotherName': 'Marcus', 'coverJob': 'driving'})];
+      // Neither fact known yet.
+      expect(pickLine(rng, pool, _ctx(), currentDay: 1), isNull);
+      // Only one of the two required facts known.
+      final oneFact = _ctx(facts: {
+        'brotherName': ConversationFact(key: 'brotherName', value: 'Marcus', firstMentionedTurn: 1, lastConfirmedTurn: 1),
+      });
+      expect(pickLine(rng, pool, oneFact, currentDay: 1), isNull);
+      // A fact present under the right key but the WRONG value still fails.
+      final wrongValue = _ctx(facts: {
+        'brotherName': ConversationFact(key: 'brotherName', value: 'Marcus', firstMentionedTurn: 1, lastConfirmedTurn: 1),
+        'coverJob': ConversationFact(key: 'coverJob', value: 'mechanic', firstMentionedTurn: 1, lastConfirmedTurn: 1),
+      });
+      expect(pickLine(rng, pool, wrongValue, currentDay: 1), isNull);
+      // Both facts known with the exact required values.
+      final bothFacts = _ctx(facts: {
+        'brotherName': ConversationFact(key: 'brotherName', value: 'Marcus', firstMentionedTurn: 1, lastConfirmedTurn: 1),
+        'coverJob': ConversationFact(key: 'coverJob', value: 'driving', firstMentionedTurn: 1, lastConfirmedTurn: 1),
+      });
+      expect(pickLine(rng, pool, bothFacts, currentDay: 1)!.text, 'knows_both');
+    });
+
+    test('honestyMin/reliabilityMin/responsivenessMin gate eligibility, same shape as trustMin etc. (Phase 9)', () {
+      final rng = Random(21);
+      final pool = [const DialogueLine('earned_it', honestyMin: 65, reliabilityMin: 60, responsivenessMin: 55)];
+      expect(pickLine(rng, pool, _ctx(honesty: 65, reliability: 60, responsiveness: 55), currentDay: 1)!.text, 'earned_it');
+      expect(pickLine(rng, pool, _ctx(honesty: 64, reliability: 60, responsiveness: 55), currentDay: 1), isNull);
+      expect(pickLine(rng, pool, _ctx(honesty: 65, reliability: 59, responsiveness: 55), currentDay: 1), isNull);
+      expect(pickLine(rng, pool, _ctx(honesty: 65, reliability: 60, responsiveness: 54), currentDay: 1), isNull);
     });
 
     test('progressionMin/progressionMax gate eligibility on topicProgress', () {
@@ -163,11 +204,11 @@ void main() {
       expect(warmCount / trials, greaterThan(0.5));
     });
 
-    test('an old requiredMemories match weighs a line down relative to a fresh one', () {
+    test('an old anyRequiredMemories match weighs a line down relative to a fresh one', () {
       final rng = Random(46);
       final pool = [
-        const DialogueLine('stale_memory_line', requiredMemories: {MemoryKind.cutOff}),
-        const DialogueLine('fresh_memory_line', requiredMemories: {MemoryKind.heardAboutCutOff}),
+        const DialogueLine('stale_memory_line', anyRequiredMemories: {MemoryKind.cutOff}),
+        const DialogueLine('fresh_memory_line', anyRequiredMemories: {MemoryKind.heardAboutCutOff}),
       ];
       final ctx = _ctx(memories: [
         const MemoryEvent(MemoryKind.cutOff, 1), // 39 days old at currentDay 40 -> floor 0.1
@@ -192,186 +233,6 @@ void main() {
       expect(lastUsedDay['line6'], 6);
       expect(history.length, 5);
       expect(history, ['line2', 'line3', 'line4', 'line5', 'line6']);
-    });
-  });
-
-  group('classifyMessage', () {
-    test('classifies warm text as warm tone', () {
-      final msg = classifyMessage("I'm sorry, I love you so much", knownEntityNames: const []);
-      expect(msg.tone, ReplyTone.warm);
-    });
-
-    test('classifies dismissive short text as cold tone', () {
-      final msg = classifyMessage('not now', knownEntityNames: const []);
-      expect(msg.tone, ReplyTone.cold);
-    });
-
-    test('classifies a bare greeting as warm, not cold', () {
-      for (final text in ['hi', 'hey', 'hello', 'hey mom', 'Hi!']) {
-        expect(classifyMessage(text, knownEntityNames: const []).tone, ReplyTone.warm, reason: text);
-      }
-    });
-
-    test('a greeting-shaped substring inside an unrelated word does not false-positive', () {
-      // "hi" appears inside "this" — must not be read as a greeting.
-      final msg = classifyMessage('this is not a good time', knownEntityNames: const []);
-      expect(msg.tone, isNot(ReplyTone.warm));
-      expect(msg.tone, isNot(ReplyTone.honest)); // and shouldn't misfire as a question either
-    });
-
-    test('a caring question with no tone-lexicon match reads as honest, not vague/cold', () {
-      // Regression: these used to fall into the generic "vague" bucket and
-      // draw a "stop dodging me" reaction, which makes no sense as a reply
-      // to a genuine question directed at the NPC.
-      for (final text in ['how you doing today', 'how so?', 'worried about what', 'are you okay']) {
-        expect(classifyMessage(text, knownEntityNames: const []).tone, ReplyTone.honest, reason: text);
-      }
-    });
-
-    test('classifies excuse language as excuse tone', () {
-      final msg = classifyMessage('it was just a long meeting, I swear nothing happened', knownEntityNames: const []);
-      expect(msg.tone, ReplyTone.excuse);
-    });
-
-    test('classifies honest framing as honest tone', () {
-      final msg = classifyMessage('honestly, the truth is I needed space', knownEntityNames: const []);
-      expect(msg.tone, ReplyTone.honest);
-    });
-
-    test('detects money and family topics from keywords', () {
-      final msg = classifyMessage('mom, can you send some cash for rent?', knownEntityNames: const []);
-      expect(msg.topics, contains(Topic.money));
-      expect(msg.topics, contains(Topic.family));
-    });
-
-    test('a bare greeting is tagged with the greeting topic', () {
-      for (final text in ['hi', 'hey', 'hello', 'hey mom']) {
-        expect(classifyMessage(text, knownEntityNames: const []).topics, contains(Topic.greeting), reason: text);
-      }
-    });
-
-    test('"hi" inside an unrelated word does not tag the greeting topic', () {
-      final msg = classifyMessage('this is not a good time', knownEntityNames: const []);
-      expect(msg.topics, isNot(contains(Topic.greeting)));
-    });
-
-    test('"how are you"-shaped questions are tagged with the wellbeing topic', () {
-      for (final text in [
-        'how are you', 'how you doing today', "how's it going", 'you doing ok?', "how's your day", 'hows your day',
-      ]) {
-        expect(classifyMessage(text, knownEntityNames: const []).topics, contains(Topic.wellbeing), reason: text);
-      }
-    });
-
-    test('a reciprocal answer to a wellbeing question is itself tagged wellbeing', () {
-      // Regression: "How's your day been?" -> "good and yours?" used to
-      // classify with no topic at all, since none of the "how ..."-shaped
-      // phrases match a reply that only answers back.
-      for (final text in ['good and yours?', 'good, and you?', 'how about you', 'what about you']) {
-        expect(classifyMessage(text, knownEntityNames: const []).topics, contains(Topic.wellbeing), reason: text);
-      }
-    });
-
-    test('"what\'s wrong"-shaped questions are tagged with the suspicion/concern topic', () {
-      for (final text in ["what's wrong", 'whats wrong']) {
-        expect(classifyMessage(text, knownEntityNames: const []).topics, contains(Topic.suspicion), reason: text);
-      }
-    });
-
-    test('question mark -> question intent', () {
-      expect(classifyMessage('are you free tonight?', knownEntityNames: const []).intent, Intent.question);
-    });
-
-    test('casual check-ins with no "?" or question word still read as a question, not a dismissal', () {
-      // Regression: "you ok" used to score Intent.dismissal purely because
-      // the dismissal lexicon's bare 'k' entry substring-matched inside
-      // "ok" — the same false-positive class as 'what' inside "whatever".
-      for (final text in ['you ok', 'you good', 'you okay', 'you alright', 'everything okay', 'whats up']) {
-        expect(classifyMessage(text, knownEntityNames: const []).intent, Intent.question, reason: text);
-      }
-    });
-
-    test('"whatever" reads as a dismissal, not a question, despite containing "what"', () {
-      expect(classifyMessage('whatever', knownEntityNames: const []).intent, Intent.dismissal);
-    });
-
-    test('a lone "ok"/"k" still reads as a dismissal (the bare-word fix only removes false substring hits)', () {
-      for (final text in ['ok', 'k', 'kk']) {
-        expect(classifyMessage(text, knownEntityNames: const []).intent, Intent.dismissal, reason: text);
-      }
-    });
-
-    test('an ordinary word containing "k" is not misread as a dismissal', () {
-      for (final text in ['I like that a lot honestly', 'we should make plans this weekend sometime soon']) {
-        expect(classifyMessage(text, knownEntityNames: const []).intent, isNot(Intent.dismissal), reason: text);
-      }
-    });
-
-    test('"I\'ll ..." -> promise intent', () {
-      expect(classifyMessage("I'll come by this weekend", knownEntityNames: const []).intent, Intent.promise);
-    });
-
-    test('"I love you" -> confession intent', () {
-      expect(classifyMessage('I love you, always have', knownEntityNames: const []).intent, Intent.confession);
-    });
-
-    test('extracts a known entity name mentioned in the text', () {
-      final msg = classifyMessage('Kiko told me you called', knownEntityNames: const ['Kiko', 'Vale']);
-      expect(msg.entities, contains('Kiko'));
-      expect(msg.entities, isNot(contains('Vale')));
-    });
-
-    test('intensity on the returned message matches computeIntensity', () {
-      const text = 'I NEVER want to see you again!!!';
-      final msg = classifyMessage(text, knownEntityNames: const []);
-      expect(msg.intensity, computeIntensity(text));
-    });
-  });
-
-  group('computeIntensity', () {
-    test('neutral short text sits near the 0.5 baseline', () {
-      expect(computeIntensity('okay'), closeTo(0.5, 0.15));
-    });
-
-    test('strong words raise intensity', () {
-      expect(computeIntensity('I hate this'), greaterThan(computeIntensity('I think this')));
-    });
-
-    test('all-caps raises intensity over the same text in lowercase', () {
-      expect(computeIntensity('LEAVE ME ALONE'), greaterThan(computeIntensity('leave me alone')));
-    });
-
-    test('a bare exclamation point raises intensity', () {
-      expect(computeIntensity('fine!'), greaterThan(computeIntensity('fine')));
-    });
-
-    test('repeated exclamation marks raise intensity further than one', () {
-      expect(computeIntensity('no!!!'), greaterThan(computeIntensity('no!')));
-    });
-
-    test('trailing off with "..." lowers intensity slightly', () {
-      expect(computeIntensity('I guess...'), lessThan(computeIntensity('I guess')));
-    });
-
-    test('longer messages score higher than short ones, all else equal', () {
-      expect(computeIntensity('word ' * 30), greaterThan(computeIntensity('word')));
-    });
-
-    test('clamps to [0, 1]', () {
-      expect(computeIntensity('HATE HATE HATE HATE!!!! ${'x' * 200}'), lessThanOrEqualTo(1.0));
-      expect(computeIntensity(''), 0.0);
-    });
-  });
-
-  group('isDebtTopic', () {
-    test('true for money-related keywords', () {
-      for (final text in ['you still owe me', 'can you lend me cash', 'pay your rent', "I'll pay you back"]) {
-        expect(isDebtTopic(text), isTrue, reason: text);
-      }
-    });
-
-    test('false for unrelated text', () {
-      expect(isDebtTopic('are we still on for dinner?'), isFalse);
     });
   });
 
@@ -545,8 +406,268 @@ void main() {
       expect(detectToneShift(previousTone: ReplyTone.warm, tone: ReplyTone.cold), isTrue);
     });
 
-    test('warm -> honest is natural drift, not a shift (only warm<->cold/excuse count)', () {
+    test('warm -> honest is natural drift, not a shift', () {
       expect(detectToneShift(previousTone: ReplyTone.warm, tone: ReplyTone.honest), isFalse);
+    });
+
+    test('honest -> excuse is a shift, same polar-opposite class as warm <-> cold', () {
+      // Regression: detectToneShift used to only recognize warm<->cold/excuse
+      // as opposite, even though toneMatch's own _oppositeTonePairs already
+      // treated honest/excuse as opposite for scoring purposes — someone
+      // being direct and then suddenly making excuses is exactly this kind
+      // of polar tell, especially mid-suspicion.
+      expect(detectToneShift(previousTone: ReplyTone.honest, tone: ReplyTone.excuse), isTrue);
+      expect(detectToneShift(previousTone: ReplyTone.excuse, tone: ReplyTone.honest), isTrue);
+    });
+
+    test('vague sits between the poles either direction -> never a shift', () {
+      for (final other in [ReplyTone.warm, ReplyTone.honest, ReplyTone.cold, ReplyTone.excuse]) {
+        expect(detectToneShift(previousTone: ReplyTone.vague, tone: other), isFalse, reason: '$other');
+      }
+    });
+  });
+
+  group('answeredQuestionMatch', () {
+    test('neutral (1.0) for a line that does not acknowledge an answered question', () {
+      expect(answeredQuestionMatch(false, true), 1.0);
+      expect(answeredQuestionMatch(false, false), 1.0);
+    });
+
+    test('boosted (3.0) when a question was genuinely just answered', () {
+      expect(answeredQuestionMatch(true, true), 3.0);
+    });
+
+    test('suppressed (0.5) when nothing was actually pending/answered', () {
+      expect(answeredQuestionMatch(true, false), 0.5);
+    });
+  });
+
+  group('planResponse', () {
+    // Every scenario below constructs the minimal signal set that decides
+    // ResponseIntent, per planResponse()'s own documented priority order.
+    const openThread = ConversationThread(topic: Topic.wellbeing, stage: 2, unresolved: true);
+
+    test('loaded ConversationIntents win outright, even with a question pending', () {
+      const cases = {
+        ConversationIntent.confront: ResponseIntent.challenge,
+        ConversationIntent.questionLoyalty: ResponseIntent.challenge,
+        ConversationIntent.insult: ResponseIntent.challenge,
+        ConversationIntent.sarcasm: ResponseIntent.challenge,
+        ConversationIntent.apologize: ResponseIntent.apologize,
+        ConversationIntent.joke: ResponseIntent.joke,
+        ConversationIntent.sayGoodbye: ResponseIntent.closeConversation,
+        ConversationIntent.makePeace: ResponseIntent.comfort,
+        ConversationIntent.reassure: ResponseIntent.comfort,
+      };
+      cases.forEach((actionIntent, expected) {
+        final plan = planResponse(
+          actionIntent: actionIntent,
+          questionJustAnswered: true, // should be outranked regardless
+          questionJustAsked: true,
+          thread: openThread,
+          topicJustChanged: true,
+          hasCallbackOpportunity: true,
+        );
+        expect(plan.intent, expected, reason: '$actionIntent');
+      });
+    });
+
+    test('a genuinely answered question outranks generic topic continuation', () {
+      final plan = planResponse(
+        actionIntent: null,
+        questionJustAnswered: true,
+        questionJustAsked: false,
+        thread: openThread,
+        topicJustChanged: false,
+        hasCallbackOpportunity: false,
+      );
+      expect(plan.intent, ResponseIntent.answerQuestion);
+    });
+
+    test('the player asking mama something directly also plans as answerQuestion', () {
+      // The reverse direction of the same ResponseIntent — see its own doc
+      // comment for why both count.
+      final plan = planResponse(
+        actionIntent: ConversationIntent.askAboutFamily,
+        questionJustAnswered: false,
+        questionJustAsked: true,
+        thread: null,
+        topicJustChanged: false,
+        hasCallbackOpportunity: false,
+      );
+      expect(plan.intent, ResponseIntent.answerQuestion);
+    });
+
+    test('elaborate plans as followUp when no question is in play', () {
+      final plan = planResponse(
+        actionIntent: ConversationIntent.elaborate,
+        questionJustAnswered: false,
+        questionJustAsked: false,
+        thread: openThread,
+        topicJustChanged: false,
+        hasCallbackOpportunity: false,
+      );
+      expect(plan.intent, ResponseIntent.followUp);
+    });
+
+    test('deflect plans as acknowledge', () {
+      final plan = planResponse(
+        actionIntent: ConversationIntent.deflect,
+        questionJustAnswered: false,
+        questionJustAsked: false,
+        thread: openThread,
+        topicJustChanged: false,
+        hasCallbackOpportunity: false,
+      );
+      expect(plan.intent, ResponseIntent.acknowledge);
+    });
+
+    test('a topic switch plans as changeTopic when nothing sharper applies', () {
+      final plan = planResponse(
+        actionIntent: null,
+        questionJustAnswered: false,
+        questionJustAsked: false,
+        thread: openThread,
+        topicJustChanged: true,
+        hasCallbackOpportunity: false,
+      );
+      expect(plan.intent, ResponseIntent.changeTopic);
+    });
+
+    test('a live callback opportunity plans as callback when no sharper signal applies', () {
+      final plan = planResponse(
+        actionIntent: null,
+        questionJustAnswered: false,
+        questionJustAsked: false,
+        thread: openThread,
+        topicJustChanged: false,
+        hasCallbackOpportunity: true,
+      );
+      expect(plan.intent, ResponseIntent.callback);
+    });
+
+    test('deepening an unresolved thread plans as continueTopic, the weakest fallback ahead of acknowledge', () {
+      final plan = planResponse(
+        actionIntent: null,
+        questionJustAnswered: false,
+        questionJustAsked: false,
+        thread: openThread, // stage: 2, unresolved: true
+        topicJustChanged: false,
+        hasCallbackOpportunity: false,
+      );
+      expect(plan.intent, ResponseIntent.continueTopic);
+    });
+
+    test('with no sharper signal and no active thread, plans as acknowledge', () {
+      final plan = planResponse(
+        actionIntent: null,
+        questionJustAnswered: false,
+        questionJustAsked: false,
+        thread: null,
+        topicJustChanged: false,
+        hasCallbackOpportunity: false,
+      );
+      expect(plan.intent, ResponseIntent.acknowledge);
+    });
+
+    test('the plan carries the thread\'s topic through for a future selection step to read', () {
+      final plan = planResponse(
+        actionIntent: null,
+        questionJustAnswered: true,
+        questionJustAsked: false,
+        thread: openThread,
+        topicJustChanged: false,
+        hasCallbackOpportunity: false,
+      );
+      expect(plan.topic, Topic.wellbeing);
+      expect(plan.thread, openThread);
+    });
+
+    group('contradiction handling (Phase 8)', () {
+      const aContradiction = ContradictionEvent(key: 'coverJob', oldValue: 'driving', newValue: 'restaurant', turn: 5);
+
+      test('a contradiction resolves to one of challenge/acknowledge/clarify, weighted 30/40/30, given a seeded rng', () {
+        final counts = <ResponseIntent, int>{};
+        const trials = 3000;
+        for (var seed = 0; seed < trials; seed++) {
+          final plan = planResponse(
+            actionIntent: null,
+            questionJustAnswered: false,
+            questionJustAsked: false,
+            thread: null,
+            topicJustChanged: false,
+            hasCallbackOpportunity: false,
+            contradiction: aContradiction,
+            rng: Random(seed),
+          );
+          counts[plan.intent] = (counts[plan.intent] ?? 0) + 1;
+        }
+        // Loose bands, not exact — this is checking the split is roughly
+        // 30/40/30 and that all three outcomes are actually reachable, not
+        // pinning an exact distribution to a specific RNG implementation.
+        expect(counts[ResponseIntent.challenge], inInclusiveRange((trials * 0.24).round(), (trials * 0.36).round()));
+        expect(counts[ResponseIntent.acknowledge], inInclusiveRange((trials * 0.33).round(), (trials * 0.47).round()));
+        expect(counts[ResponseIntent.clarify], inInclusiveRange((trials * 0.24).round(), (trials * 0.36).round()));
+      });
+
+      test('every planned outcome carries the ContradictionEvent that drove it', () {
+        final plan = planResponse(
+          actionIntent: null,
+          questionJustAnswered: false,
+          questionJustAsked: false,
+          thread: null,
+          topicJustChanged: false,
+          hasCallbackOpportunity: false,
+          contradiction: aContradiction,
+          rng: Random(1),
+        );
+        expect(plan.contradiction, aContradiction);
+      });
+
+      test('a loaded ConversationIntent still wins outright over a pending contradiction', () {
+        final plan = planResponse(
+          actionIntent: ConversationIntent.joke,
+          questionJustAnswered: false,
+          questionJustAsked: false,
+          thread: null,
+          topicJustChanged: false,
+          hasCallbackOpportunity: false,
+          contradiction: aContradiction,
+          rng: Random(1),
+        );
+        expect(plan.intent, ResponseIntent.joke);
+      });
+
+      test('a contradiction outranks a genuine question exchange', () {
+        final plan = planResponse(
+          actionIntent: null,
+          questionJustAnswered: true,
+          questionJustAsked: false,
+          thread: null,
+          topicJustChanged: false,
+          hasCallbackOpportunity: false,
+          contradiction: aContradiction,
+          rng: Random(1),
+        );
+        expect(plan.intent, isNot(ResponseIntent.answerQuestion));
+        expect(plan.contradiction, aContradiction);
+      });
+
+      test('omitting rng still resolves to a valid outcome (defaults to a fresh Random, same pattern as CareerController)', () {
+        final plan = planResponse(
+          actionIntent: null,
+          questionJustAnswered: false,
+          questionJustAsked: false,
+          thread: null,
+          topicJustChanged: false,
+          hasCallbackOpportunity: false,
+          contradiction: aContradiction,
+        );
+        expect(
+          plan.intent,
+          anyOf(ResponseIntent.challenge, ResponseIntent.acknowledge, ResponseIntent.clarify),
+        );
+      });
     });
   });
 
@@ -601,6 +722,82 @@ void main() {
     test('family alone (no greeting) is unaffected by the carve-out', () {
       final result = advanceTopic(currentTopic: null, currentProgress: 0, messageTopics: {Topic.family});
       expect(result.topic, Topic.family);
+    });
+
+    test('a fresh topic with a declared subject carries it, and starts unresolved with turnsActive 1', () {
+      final result = advanceTopic(
+        currentTopic: null,
+        currentProgress: 0,
+        messageTopics: {Topic.money},
+        messageSubject: 'rent',
+      );
+      expect(result.subject, 'rent');
+      expect(result.unresolved, isTrue);
+      expect(result.turnsActive, 1);
+    });
+
+    test('deepening the same topic keeps the old subject when the new turn does not declare one', () {
+      final result = advanceTopic(
+        currentTopic: Topic.money,
+        currentProgress: 1,
+        messageTopics: {Topic.money},
+        currentSubject: 'rent',
+        currentTurnsActive: 1,
+      );
+      expect(result.subject, 'rent');
+      expect(result.turnsActive, 2);
+    });
+
+    test('deepening the same topic with a new declared subject narrows it further (rent -> borrowing from brother)', () {
+      final result = advanceTopic(
+        currentTopic: Topic.money,
+        currentProgress: 1,
+        messageTopics: {Topic.money},
+        currentSubject: 'rent',
+        messageSubject: 'borrowing from brother',
+      );
+      expect(result.subject, 'borrowing from brother');
+    });
+
+    test('resolves clears the subject and flips unresolved false, even while staying on-topic', () {
+      final result = advanceTopic(
+        currentTopic: Topic.money,
+        currentProgress: 2,
+        messageTopics: {Topic.money},
+        currentSubject: 'debt',
+        currentUnresolved: true,
+        resolves: true,
+      );
+      expect(result.subject, isNull);
+      expect(result.unresolved, isFalse);
+    });
+
+    test('switching to a genuinely different topic drops the old subject and resets turnsActive to 1', () {
+      final result = advanceTopic(
+        currentTopic: Topic.family,
+        currentProgress: 3,
+        messageTopics: {Topic.money},
+        currentSubject: 'a family argument',
+        currentTurnsActive: 5,
+      );
+      expect(result.subject, isNull);
+      expect(result.turnsActive, 1);
+    });
+
+    test('turnsActive climbs on a hold turn (no topic mentioned) as long as a thread is open', () {
+      final result = advanceTopic(
+        currentTopic: Topic.money,
+        currentProgress: 2,
+        messageTopics: const {},
+        currentTurnsActive: 2,
+      );
+      expect(result.turnsActive, 3);
+      expect(result.progress, 2); // progress itself does not move on a hold
+    });
+
+    test('turnsActive stays 0 on a hold turn when there is no active thread at all', () {
+      final result = advanceTopic(currentTopic: null, currentProgress: 0, messageTopics: const {});
+      expect(result.turnsActive, 0);
     });
   });
 
@@ -740,6 +937,129 @@ void main() {
         recordMemory(memories, MemoryEvent(MemoryKind.firstWarmReply, i), cap: 3);
       }
       expect(memories.length, 3);
+    });
+  });
+
+  group('Behavioral reputation (Phase 9)', () {
+    group('nudgeHonesty', () {
+      test('below threshold (default 3) does nothing, at or above it nudges up by delta', () {
+        expect(nudgeHonesty(50, 2), 50);
+        expect(nudgeHonesty(50, 3), closeTo(50.3, 0.001));
+        expect(nudgeHonesty(50, 5), closeTo(50.3, 0.001)); // same delta regardless of how far past threshold
+      });
+
+      test('clamps at 100', () {
+        expect(nudgeHonesty(99.9, 3), 100);
+      });
+
+      test('a custom threshold/delta is honored', () {
+        expect(nudgeHonesty(50, 4, threshold: 5), 50);
+        expect(nudgeHonesty(50, 5, threshold: 5, delta: 2.0), 52);
+      });
+    });
+
+    group('nudgeSuspicionFromDodgePattern', () {
+      test('below threshold (default 2) does nothing, at or above it nudges up by delta', () {
+        expect(nudgeSuspicionFromDodgePattern(20, 1), 20);
+        expect(nudgeSuspicionFromDodgePattern(20, 2), 21);
+        expect(nudgeSuspicionFromDodgePattern(20, 4), 21);
+      });
+
+      test('clamps at 100', () {
+        expect(nudgeSuspicionFromDodgePattern(99.5, 2, delta: 1.0), 100);
+      });
+    });
+
+    group('nudgeReliability', () {
+      test('always applies delta (not gated on a streak/threshold — a promise kept is a discrete event)', () {
+        expect(nudgeReliability(50), closeTo(51.0, 0.001));
+        expect(nudgeReliability(50, delta: 3.0), 53);
+      });
+
+      test('clamps at 100', () {
+        expect(nudgeReliability(99.5), 100);
+      });
+    });
+
+    group('nudgeResponsiveness', () {
+      test('a prompt reply (<=1 day) nudges up', () {
+        expect(nudgeResponsiveness(50, 0), 51);
+        expect(nudgeResponsiveness(50, 1), 51);
+      });
+
+      test('a late reply (>=3 days) nudges down', () {
+        expect(nudgeResponsiveness(50, 3), 49);
+        expect(nudgeResponsiveness(50, 10), 49);
+      });
+
+      test('an ordinary gap (2 days) is neutral', () {
+        expect(nudgeResponsiveness(50, 2), 50);
+      });
+
+      test('clamps to [0, 100]', () {
+        expect(nudgeResponsiveness(99.5, 0), 100);
+        expect(nudgeResponsiveness(0.5, 5), 0);
+      });
+    });
+  });
+
+  group('recordFact', () {
+    test('a brand-new key is inserted with full confidence, first == last confirmed turn, and returns no contradiction', () {
+      final facts = <String, ConversationFact>{};
+      final result = recordFact(facts, 'brotherName', 'Marcus', 5);
+      expect(result, isNull);
+      final fact = facts['brotherName']!;
+      expect(fact.value, 'Marcus');
+      expect(fact.confidence, 1.0);
+      expect(fact.firstMentionedTurn, 5);
+      expect(fact.lastConfirmedTurn, 5);
+    });
+
+    test('re-confirming the same value advances lastConfirmedTurn, nudges confidence up capped at 1.0, and returns no contradiction', () {
+      final facts = <String, ConversationFact>{};
+      // correctionConfidence only applies on the contradicting-value path
+      // below, not a fresh insert (that's always full 1.0 confidence) — so
+      // to observe the upward nudge at all, first drive confidence down via
+      // a genuine correction, then re-confirm that.
+      recordFact(facts, 'brotherName', 'Marco', 1);
+      recordFact(facts, 'brotherName', 'Marcus', 5, correctionConfidence: 0.5);
+      final reconfirmResult = recordFact(facts, 'brotherName', 'Marcus', 9);
+      expect(reconfirmResult, isNull);
+      final fact = facts['brotherName']!;
+      expect(fact.lastConfirmedTurn, 9);
+      expect(fact.firstMentionedTurn, 5); // reset by the correction at turn 5, untouched by the re-confirm
+      expect(fact.confidence, closeTo(0.6, 0.001));
+
+      // Confidence starts at 1.0 for a fresh key, so re-confirming repeatedly
+      // must clamp rather than overshoot.
+      recordFact(facts, 'jobSteady', 'true', 1);
+      recordFact(facts, 'jobSteady', 'true', 2);
+      recordFact(facts, 'jobSteady', 'true', 3);
+      expect(facts['jobSteady']!.confidence, 1.0);
+    });
+
+    test('a contradicting value replaces it, resets firstMentionedTurn, lowers confidence, and returns the ContradictionEvent', () {
+      final facts = <String, ConversationFact>{};
+      recordFact(facts, 'worksNightShift', 'true', 2);
+      final result = recordFact(facts, 'worksNightShift', 'false', 10);
+      final fact = facts['worksNightShift']!;
+      expect(fact.value, 'false');
+      expect(fact.firstMentionedTurn, 10); // a new claim, starting its own history
+      expect(fact.lastConfirmedTurn, 10);
+      expect(fact.confidence, lessThan(1.0));
+
+      expect(result, isNotNull);
+      expect(result!.key, 'worksNightShift');
+      expect(result.oldValue, 'true');
+      expect(result.newValue, 'false');
+      expect(result.turn, 10);
+    });
+
+    test('important carries forward through a correction once set', () {
+      final facts = <String, ConversationFact>{};
+      recordFact(facts, 'brotherName', 'Marcus', 1, important: true);
+      recordFact(facts, 'brotherName', 'Marco', 4); // a correction, important not re-passed
+      expect(facts['brotherName']!.important, isTrue);
     });
   });
 

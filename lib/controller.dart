@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:math';
 import 'package:flutter/widgets.dart' hide Intent;
 import 'content/mama_reactions.dart';
+import 'content/vale_reactions.dart';
 import 'conversation/intents.dart';
+import 'conversation/vale_intents.dart';
 import 'data.dart';
 
 double _clamp01to100(double v) => v.clamp(0, 100).toDouble();
@@ -467,6 +469,9 @@ class CareerController extends ChangeNotifier {
       if (!weeklyStrikeOccurred) cleanWeeks += 1;
       weeklyStrikeOccurred = false;
       if (cleanWeeks >= kCleanWeeksToPromote) promotionAvailable = true;
+      for (final rel in relationships.values) {
+        rel.moneyAsksThisWeek = 0;
+      }
     }
     if (_checkExposure()) return false;
     _tickPersonalRelationships();
@@ -1168,9 +1173,9 @@ class CareerController extends ChangeNotifier {
         chips.add(const PersonalReplyAction('Too close', "Almost messed up bad today. Keeping it together though.", tone: ReplyTone.vague, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.5));
         break;
       case 'run_success':
-        chips.add(const PersonalReplyAction('Something went right', "Something I had to do today actually worked out.", tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.4));
-        chips.add(const PersonalReplyAction('Getting it done', "Pulled off something today I wasn't sure I could.", tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.4));
-        chips.add(const PersonalReplyAction('Getting the hang of it', "Starting to get the hang of things. Feels good.", tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.3));
+        chips.add(const PersonalReplyAction('Something went right', "Something I had to do today actually worked out.", tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.4));
+        chips.add(const PersonalReplyAction('Getting it done', "Pulled off something today I wasn't sure I could.", tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.4));
+        chips.add(const PersonalReplyAction('Getting the hang of it', "Starting to get the hang of things. Feels good.", tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.3));
         break;
       case 'crossed_line':
         chips.add(const PersonalReplyAction('Crossed a line', "I did something today I can't really undo.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.7));
@@ -1221,14 +1226,14 @@ class CareerController extends ChangeNotifier {
 
     // ── 3. Cash state ─────────────────────────────────────────────────────
     if (cash < 300 && level >= 2) {
-      chips.add(const PersonalReplyAction('Broke', "Money's been really tight lately.", tone: ReplyTone.honest, topics: {Topic.money}, intent: Intent.statement, intensity: 0.5));
+      chips.add(const PersonalReplyAction('Broke', "Money's been really tight lately.", tone: ReplyTone.honest, topics: {Topic.money}, intent: Intent.statement, intensity: 0.5, subject: 'being broke'));
       chips.add(const PersonalReplyAction('Struggling financially', "Things have been rough financially. Not gonna lie.", tone: ReplyTone.honest, topics: {Topic.money}, intent: Intent.statement, intensity: 0.5));
-      chips.add(const PersonalReplyAction('Debt stress', "I owe people. It's sitting heavy on me.", tone: ReplyTone.honest, topics: {Topic.money}, intent: Intent.statement, intensity: 0.5));
+      chips.add(const PersonalReplyAction('Debt stress', "I owe people. It's sitting heavy on me.", tone: ReplyTone.honest, topics: {Topic.money}, intent: Intent.statement, intensity: 0.5, subject: 'debt'));
     } else if (cash > 50000) {
-      chips.add(const PersonalReplyAction('Doing well', "Things have been going well for me lately. Money-wise.", tone: ReplyTone.warm, topics: {Topic.money}, intent: Intent.statement, intensity: 0.4));
-      chips.add(const PersonalReplyAction('Good stretch', "Had a good stretch recently. Can't complain.", tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.3));
+      chips.add(const PersonalReplyAction('Doing well', "Things have been going well for me lately. Money-wise.", tone: ReplyTone.warm, topics: {Topic.money}, intent: Intent.statement, intensity: 0.4, resolvesThread: true));
+      chips.add(const PersonalReplyAction('Good stretch', "Had a good stretch recently. Can't complain.", tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.3));
     } else if (cash > 8000 && level <= 3) {
-      chips.add(const PersonalReplyAction('Good week', "Actually had a decent week financially.", tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.4));
+      chips.add(const PersonalReplyAction('Good week', "Actually had a decent week financially.", tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.4));
     }
 
     // ── 4. Heat / being watched ────────────────────────────────────────────
@@ -1369,24 +1374,28 @@ class CareerController extends ChangeNotifier {
     // independently.
     final contextChips = _storyContextChips(contactId).take(3).map(StoryChipOption.new).toList();
 
-    // Mama gets the intent-chip catalog — see conversation/intents.dart.
-    // Every other contact keeps the exact original kPersonalReplyActions
-    // catalog and scoring below, untouched.
-    if (contactId == 'mama') {
-      // Mama-specific legacy actions ('Change the subject', 'Come clean (a
+    // Mama and Vale get the intent-chip catalog — see conversation/intents.dart
+    // (Mama's kIntentChips) and conversation/vale_intents.dart (Vale's
+    // kValeIntentChips). Every other contact keeps the exact original
+    // kPersonalReplyActions catalog and scoring below, untouched.
+    if (contactId == 'mama' || contactId == 'partner') {
+      final chips = contactId == 'mama' ? kIntentChips : kValeIntentChips;
+
+      // Contact-specific legacy actions ('Change the subject', 'Come clean (a
       // little)', 'Deny everything', 'Brush it off', etc. — see the
-      // allowedContacts: {'mama'} entries in kPersonalReplyActions) predate
-      // the intent-chip system and were never migrated into it. They cover
+      // allowedContacts entries in kPersonalReplyActions) predate the
+      // intent-chip system and were never migrated into it. They cover
       // exactly the deflection/answer register the generic intent-chip
-      // catalog doesn't have (nothing in kIntentChips lets the player lie
-      // about or partially explain a suspicion-raising topic) — without
-      // them, a pointed follow-up like "what are the actual plans?" had no
-      // chip that actually addressed it. Scored/gated identically to every
-      // other contact's kPersonalReplyActions tray below, just restricted to
-      // entries tagged for her.
+      // catalog doesn't have (nothing in kIntentChips/kValeIntentChips lets
+      // the player lie about or partially explain a suspicion-raising topic)
+      // — without them, a pointed follow-up like "what are the actual
+      // plans?" had no chip that actually addressed it. Scored/gated
+      // identically to every other contact's kPersonalReplyActions tray
+      // below, just restricted to entries tagged for this contact. (Vale has
+      // none of these yet, so this is simply empty for her today.)
       final eligibleLegacy = [
         for (var i = 0; i < kPersonalReplyActions.length; i++)
-          if (kPersonalReplyActions[i].allowedContacts?.contains('mama') ?? false)
+          if (kPersonalReplyActions[i].allowedContacts?.contains(contactId) ?? false)
             if (kPersonalReplyActions[i].showWhenMoodBelow == null || rel.mood < kPersonalReplyActions[i].showWhenMoodBelow!)
               if (kPersonalReplyActions[i].showWhenMoodAbove == null || rel.mood > kPersonalReplyActions[i].showWhenMoodAbove!)
                 if (!kPersonalReplyActions[i].requiresThread || !threadEmpty)
@@ -1408,17 +1417,17 @@ class CareerController extends ChangeNotifier {
       final legacyChips = pickedLegacy.map((p) => StoryChipOption(p.action));
 
       final eligible = [
-        for (var i = 0; i < kIntentChips.length; i++)
-          if (kIntentChips[i].showWhenMoodBelow == null || rel.mood < kIntentChips[i].showWhenMoodBelow!)
-            if (kIntentChips[i].showWhenMoodAbove == null || rel.mood > kIntentChips[i].showWhenMoodAbove!)
-              if (!kIntentChips[i].requiresThread || !threadEmpty)
-                if (kIntentChips[i].showWhenLevelMin == null || lv >= kIntentChips[i].showWhenLevelMin!)
-                  if (kIntentChips[i].showWhenLevelMax == null || lv <= kIntentChips[i].showWhenLevelMax!)
-                    if (kIntentChips[i].showWhenTrustBelow == null || rel.trust < kIntentChips[i].showWhenTrustBelow!)
-                      if (kIntentChips[i].showWhenTrustAbove == null || rel.trust > kIntentChips[i].showWhenTrustAbove!)
-                        if (kIntentChips[i].showWhenSuspicionAbove == null || rel.suspicion > kIntentChips[i].showWhenSuspicionAbove!)
-                          if (kIntentChips[i].showWhenClosenessAbove == null || rel.closeness > kIntentChips[i].showWhenClosenessAbove!)
-                            (index: i, chip: kIntentChips[i]),
+        for (var i = 0; i < chips.length; i++)
+          if (chips[i].showWhenMoodBelow == null || rel.mood < chips[i].showWhenMoodBelow!)
+            if (chips[i].showWhenMoodAbove == null || rel.mood > chips[i].showWhenMoodAbove!)
+              if (!chips[i].requiresThread || !threadEmpty)
+                if (chips[i].showWhenLevelMin == null || lv >= chips[i].showWhenLevelMin!)
+                  if (chips[i].showWhenLevelMax == null || lv <= chips[i].showWhenLevelMax!)
+                    if (chips[i].showWhenTrustBelow == null || rel.trust < chips[i].showWhenTrustBelow!)
+                      if (chips[i].showWhenTrustAbove == null || rel.trust > chips[i].showWhenTrustAbove!)
+                        if (chips[i].showWhenSuspicionAbove == null || rel.suspicion > chips[i].showWhenSuspicionAbove!)
+                          if (chips[i].showWhenClosenessAbove == null || rel.closeness > chips[i].showWhenClosenessAbove!)
+                            (index: i, chip: chips[i]),
       ];
       final scored = [
         for (final e in eligible) (index: e.index, chip: e.chip, score: _intentChipScore(e.chip, rel: rel, threadEmpty: threadEmpty, tod: tod, level: lv)),
@@ -1444,7 +1453,17 @@ class CareerController extends ChangeNotifier {
       // already sorted this way (see above), so this just carries that
       // order through instead of discarding it.
       final pickedChips = picked.map((p) => p.chip).toList();
-      return [...contextChips, ...legacyChips, ...pickedChips];
+      // Mama-only for now: resolveMoneyAsk's reaction pool (kMamaMoneyAskReactions)
+      // is written in her voice specifically, so surfacing this for Vale
+      // would send her replies in the wrong character's voice. Surfaced
+      // whenever the live thread is actually on money and the weekly cap
+      // isn't spent — see resolveMoneyAsk. Placed right after the context
+      // chips so it's easy to spot the turn it's actually relevant, rather
+      // than buried among the always-present intent chips.
+      final moneyAskChip = (contactId == 'mama' && rel.currentTopic == Topic.money && moneyAsksRemaining(contactId) > 0)
+          ? const [MoneyAskChipOption()]
+          : const <ReplyOption>[];
+      return [...contextChips, ...moneyAskChip, ...legacyChips, ...pickedChips];
     }
 
     final eligible = [
@@ -1486,6 +1505,17 @@ class CareerController extends ChangeNotifier {
   /// deflection/answer gaps the generic intent-chip catalog doesn't cover,
   /// not to duplicate it wholesale.
   static const int _mamaLegacyActionCount = 2;
+
+  /// How many times per week (reset at the [_advanceDay] week boundary) the
+  /// player can use Mama's "(Ask for Money)" flow — see [resolveMoneyAsk].
+  /// Small on purpose: unlike every other personal-thread action, this one
+  /// grants real [cash], so it needs a hard cap rather than just a
+  /// relationship-stat nudge.
+  static const int kMaxMoneyAsksPerWeek = 2;
+
+  /// Remaining "(Ask for Money)" uses this week for [contactId].
+  int moneyAsksRemaining(String contactId) =>
+      (kMaxMoneyAsksPerWeek - relationships[contactId]!.moneyAsksThisWeek).clamp(0, kMaxMoneyAsksPerWeek);
 
   /// Mirrors [_personalReplyOptionScore], adapted to an [IntentChip]'s
   /// (primaryTone, primaryTopics, primaryIntent) — the representative
@@ -1530,7 +1560,7 @@ class CareerController extends ChangeNotifier {
     if (rel.mood < -30 && (a.primaryTone == ReplyTone.cold || a.primaryIntent == Intent.dismissal)) score -= 4;
     if (rel.mood < -10 && a.primaryIntent == Intent.dismissal) score -= 2;
     if (rel.mood > 30 && a.primaryTopics.contains(Topic.affection)) score += 2;
-    if (rel.mood > 30 && a.primaryTopics.contains(Topic.wellbeing)) score += 1;
+    if (rel.mood > 30 && (a.primaryTopics.contains(Topic.wellbeing) || a.primaryTopics.contains(Topic.goodNews))) score += 1;
 
     switch (tod) {
       case TimeOfDay.morning:
@@ -1565,7 +1595,8 @@ class CareerController extends ChangeNotifier {
   void sendIntent(String contactId, ConversationIntent intent) {
     final rel = relationships[contactId]!;
     if (rel.goneQuiet || rel.resolved || rel.isBlocked) return;
-    final chip = kIntentChips.firstWhere((c) => c.intent == intent);
+    final chips = contactId == 'mama' ? kIntentChips : kValeIntentChips;
+    final chip = chips.firstWhere((c) => c.intent == intent);
     final ctx = DialogueContext(
       mood: rel.mood,
       closeness: rel.closeness,
@@ -1581,6 +1612,10 @@ class CareerController extends ChangeNotifier {
       playerTopicsToday: rel.topicsDiscussedToday,
       levelPhase: levelPhase,
       recentConversation: rel.recentConversation,
+      facts: rel.facts,
+      honesty: rel.honesty,
+      reliability: rel.reliability,
+      responsiveness: rel.responsiveness,
     );
     final line = pickLine(
           _rng,
@@ -1601,8 +1636,145 @@ class CareerController extends ChangeNotifier {
       intent: line.intent ?? chip.primaryIntent,
       intensity: chip.intensity,
       conversationIntent: intent,
+      // Forwarded from whichever specific phrasing pickLine() chose — a
+      // pre-existing gap fixed alongside establishesFacts below: subject/
+      // resolvesThread already existed on DialogueLine (Phase 3) but were
+      // never carried over here, so no IntentChip phrasing's subject/
+      // resolvesThread has ever actually taken effect. No behavior change
+      // for existing content (nothing currently sets either on a phrasing),
+      // but silently dropping them here would leave establishesFacts with
+      // the exact same latent gap the moment anyone tries to use it below.
+      subject: line.subject,
+      resolvesThread: line.resolvesThread,
+      establishesFacts: line.establishesFacts,
+      fulfillsPromise: line.fulfillsPromise,
     );
     personalReplyAction(contactId, action);
+  }
+
+  /// Resolves the player's typed dollar amount from Mama's "(Ask for Money)"
+  /// flow (relationships_screen.dart's _showAskForMoneyDialog, reached via
+  /// [MoneyAskChipOption] in [personalReplyOptions]). Distinct from
+  /// [sendIntent]/[personalReplyAction]: this is the one place in a personal
+  /// thread where the player's reply carries a real number instead of a
+  /// pre-written phrasing, so the reaction has to branch on the amount
+  /// itself (see [_resolveMoneyAskOutcome]) rather than a scripted
+  /// (tone, topic, intent). Also the only personal-thread action that grants
+  /// real [cash] — capped by [kMaxMoneyAsksPerWeek]/[moneyAsksRemaining] so
+  /// it can't become a free-money loop.
+  void resolveMoneyAsk(String contactId, int amount) {
+    final rel = relationships[contactId]!;
+    if (rel.goneQuiet || rel.resolved || rel.isBlocked) return;
+    if (amount <= 0 || moneyAsksRemaining(contactId) <= 0) return;
+    rel.moneyAsksThisWeek += 1;
+
+    personalThreads[contactId]!.add(Message('Can you send me \$$amount?', true));
+
+    final advanced = advanceTopic(
+      currentTopic: rel.currentTopic,
+      currentProgress: rel.topicProgress,
+      messageTopics: {Topic.money},
+      currentSubject: rel.topicSubject,
+      currentUnresolved: rel.topicUnresolved,
+      currentTurnsActive: rel.topicTurnsActive,
+      messageSubject: 'money ask',
+    );
+    rel.currentTopic = advanced.topic;
+    rel.topicProgress = advanced.progress;
+    rel.topicSubject = advanced.subject;
+    rel.topicUnresolved = advanced.unresolved;
+    rel.topicTurnsActive = advanced.turnsActive;
+    rel.lastQuestionAnswered = true;
+
+    rel.turnCount += 1;
+    _openPendingInteraction(rel, type: InteractionType.request, topic: Topic.money, subject: 'money ask');
+    rel.recentConversation.add(ConversationEvent(
+      topic: Topic.money,
+      tone: ReplyTone.honest,
+      intensity: 0.6,
+      fromMe: true,
+      turn: rel.turnCount,
+      day: day,
+      level: level,
+      phase: levelPhase,
+      importance: MemoryImportance.medium,
+    ));
+
+    final outcome = _resolveMoneyAskOutcome(amount, rel);
+    // The request is resolved the instant Mama responds — granted, reluctant,
+    // or refused all count as "addressed"; resolved means answered, not
+    // necessarily satisfied.
+    _resolvePendingInteraction(rel, InteractionType.request);
+    switch (outcome) {
+      case MoneyAskOutcome.granted:
+        cash += amount;
+        rel.trust = (rel.trust + 3).clamp(0, 100);
+        rel.debt = (rel.debt + amount / 15).clamp(0, 100);
+        rel.mood = (rel.mood + 6).clamp(-100, 100);
+        break;
+      case MoneyAskOutcome.reluctant:
+        cash += amount;
+        rel.debt = (rel.debt + amount / 8).clamp(0, 100);
+        rel.suspicion = (rel.suspicion + 6).clamp(0, 100);
+        rel.mood = (rel.mood - 3).clamp(-100, 100);
+        break;
+      case MoneyAskOutcome.refused:
+        rel.mood = (rel.mood - 10).clamp(-100, 100);
+        rel.suspicion = (rel.suspicion + (amount > 300 ? 10 : 5)).clamp(0, 100);
+        break;
+    }
+
+    final ctx = DialogueContext(
+      mood: rel.mood,
+      closeness: rel.closeness,
+      trust: rel.trust,
+      suspicion: rel.suspicion,
+      daysSinceReply: rel.daysSinceReply,
+      recentTones: rel.recentTones,
+      memories: rel.memories,
+      timeOfDay: timeOfDay,
+      isWeekend: isWeekend,
+      currentTopic: rel.currentTopic,
+      topicProgress: rel.topicProgress,
+      levelPhase: levelPhase,
+      recentConversation: rel.recentConversation,
+      facts: rel.facts,
+      honesty: rel.honesty,
+      reliability: rel.reliability,
+      responsiveness: rel.responsiveness,
+    );
+    final pool = kMamaMoneyAskReactions[outcome]!;
+    final line = pickLine(_rng, pool, ctx, currentDay: day, lineLastUsedDay: rel.lineLastUsedDay, recentLineHistory: rel.recentLineHistory) ?? pool.first;
+    recordLineUse(rel.lineLastUsedDay, rel.recentLineHistory, line, day);
+
+    personalThreads[contactId]!.add(Message(line.text, false));
+    rel.lastLine = line.text;
+    rel.recentConversation.add(ConversationEvent(
+      topic: Topic.money,
+      tone: ReplyTone.honest,
+      intensity: 0.6,
+      fromMe: false,
+      turn: rel.turnCount,
+      day: day,
+      level: level,
+      phase: levelPhase,
+      importance: MemoryImportance.medium,
+    ));
+    _pruneConversationMemory(rel);
+    notifyListeners();
+  }
+
+  /// $100 or less: she just sends it. $101-300: she will, but only once
+  /// there's enough trust/closeness to not feel used — otherwise it's a
+  /// refusal like anything larger. Above $300 is always too much, regardless
+  /// of relationship state — no amount of trust makes handing over that much
+  /// cash on a text thread feel reasonable to a mother on a tight budget.
+  static MoneyAskOutcome _resolveMoneyAskOutcome(int amount, RelationshipState rel) {
+    if (amount <= 100) return MoneyAskOutcome.granted;
+    if (amount <= 300) {
+      return (rel.trust >= 35 && rel.closeness >= 30) ? MoneyAskOutcome.reluctant : MoneyAskOutcome.refused;
+    }
+    return MoneyAskOutcome.refused;
   }
 
   /// How much weight a [ConversationEvent] carries in
@@ -1670,6 +1842,49 @@ class CareerController extends ChangeNotifier {
     }
   }
 
+  /// Opens a new [PendingInteraction], first resolving any existing
+  /// unresolved one of the same [type] — mirrors the single-slot semantics
+  /// [RelationshipState.lastQuestionAnswered] already had for questions
+  /// specifically: only one of a given type is ever meaningfully "live" at
+  /// once, so a fresh one supersedes rather than piling up alongside a stale
+  /// one nobody was ever going to resolve. FIFO-capped the same way
+  /// [_pruneConversationMemory] caps recentConversation, so a long-running
+  /// relationship's history doesn't grow unbounded.
+  void _openPendingInteraction(
+    RelationshipState rel, {
+    required InteractionType type,
+    Topic? topic,
+    String? subject,
+    int? deadlineTurn,
+  }) {
+    for (final existing in rel.pendingInteractions) {
+      if (existing.type == type && !existing.resolved) existing.resolved = true;
+    }
+    rel.pendingInteractions.add(PendingInteraction(
+      type: type,
+      topic: topic,
+      subject: subject,
+      createdTurn: rel.turnCount,
+      deadlineTurn: deadlineTurn,
+    ));
+    while (rel.pendingInteractions.length > 20) {
+      rel.pendingInteractions.removeAt(0);
+    }
+  }
+
+  /// Resolves the most recently opened, still-unresolved [type] interaction,
+  /// if any. A no-op when nothing of that type is currently open — safe to
+  /// call speculatively (see its call site in [personalReplyAction]) rather
+  /// than only when the caller already knows one exists.
+  void _resolvePendingInteraction(RelationshipState rel, InteractionType type) {
+    for (final existing in rel.pendingInteractions.reversed) {
+      if (existing.type == type && !existing.resolved) {
+        existing.resolved = true;
+        return;
+      }
+    }
+  }
+
   /// Higher favors surfacing [a] in [personalReplyOptions] right now.
   /// Additive nudges on a base of 1.0 — not a formal formula like the
   /// engine's [pickLine] weights, just enough of a thumb on the scale that
@@ -1709,7 +1924,7 @@ class CareerController extends ChangeNotifier {
     if (rel.mood < -30 && (a.tone == ReplyTone.cold || a.intent == Intent.dismissal)) score -= 4;
     if (rel.mood < -10 && a.intent == Intent.dismissal) score -= 2;
     if (rel.mood > 30 && a.topics.contains(Topic.affection)) score += 2;
-    if (rel.mood > 30 && a.topics.contains(Topic.wellbeing)) score += 1;
+    if (rel.mood > 30 && (a.topics.contains(Topic.wellbeing) || a.topics.contains(Topic.goodNews))) score += 1;
 
     // Time of day colors what reads naturally to bring up.
     switch (tod) {
@@ -1760,6 +1975,11 @@ class CareerController extends ChangeNotifier {
     final p = kPersonalContact[contactId]!;
     final impact = impactMultiplier(action.intensity);
 
+    // Captured before advanceTopic overwrites it — planResponse() needs to
+    // know whether this turn actually switched topics, not just what the
+    // topic is now.
+    final previousTopic = rel.currentTopic;
+
     // Tracks what this conversation thread is on and how many turns it's
     // been on it — lets reaction selection continue/deepen the same topic
     // instead of picking blind by tone alone (see advanceTopic()).
@@ -1767,17 +1987,38 @@ class CareerController extends ChangeNotifier {
       currentTopic: rel.currentTopic,
       currentProgress: rel.topicProgress,
       messageTopics: action.topics,
+      currentSubject: rel.topicSubject,
+      currentUnresolved: rel.topicUnresolved,
+      currentTurnsActive: rel.topicTurnsActive,
+      messageSubject: action.subject,
+      resolves: action.resolvesThread,
     );
     rel.currentTopic = advanced.topic;
     rel.topicProgress = advanced.progress;
+    rel.topicSubject = advanced.subject;
+    rel.topicUnresolved = advanced.unresolved;
+    rel.topicTurnsActive = advanced.turnsActive;
 
     // Was a question mama asked left dangling? A dismissal ("whatever",
     // "nvm") while one's pending is a dodge — surfaces for exactly this
     // reply via questionJustDodged, then clears either way (the question
     // isn't "pending" indefinitely once the player has responded at all).
+    // Captured before resolvePendingQuestion overwrites lastQuestionAnswered
+    // — planResponse() needs to know whether one was genuinely pending
+    // going into this turn, not just the post-turn state.
+    final questionWasPending = !rel.lastQuestionAnswered;
     final resolved = resolvePendingQuestion(wasAnswered: rel.lastQuestionAnswered, messageIntent: action.intent);
     rel.lastQuestionAnswered = resolved.answered;
+    if (resolved.answered) _resolvePendingInteraction(rel, InteractionType.question);
     final dodgedNow = resolved.justDodged;
+
+    // Behavioral reputation (Phase 9): a dodge PATTERN, not just this one
+    // dodge — dodgeMatch/dodgedNow already drive this turn's own line
+    // selection; this is the separate "this isn't the first time" layer on
+    // top of that, so it only counts consecutive dodges, resetting on any
+    // non-dodge reply.
+    rel.consecutiveDodgeCount = dodgedNow ? rel.consecutiveDodgeCount + 1 : 0;
+    rel.suspicion = nudgeSuspicionFromDodgePattern(rel.suspicion, rel.consecutiveDodgeCount);
 
     // Short-term conversation memory (intent-chip system): every turn gets a
     // ConversationEvent, so a later reply — Mama's, specifically, see
@@ -1787,6 +2028,38 @@ class CareerController extends ChangeNotifier {
     // recorded (importance low), just never match a requiresRecentIntent gate.
     rel.turnCount += 1;
     final myTurn = rel.turnCount;
+
+    // A promise-tagged reply opens a pending interaction of its own — nothing
+    // previously tracked a promise past the one-time MemoryKind.promiseMade
+    // milestone, so there was no way to later reference (or check on)
+    // something specific the player committed to. Placed after the turnCount
+    // increment above so createdTurn lines up with the same turn number this
+    // turn's ConversationEvent below is logged under, not the prior turn's.
+    if (action.intent == Intent.promise) {
+      _openPendingInteraction(rel, type: InteractionType.promise, topic: rel.currentTopic, subject: action.subject);
+    }
+
+    // A promise explicitly kept (Phase 9) — the "kept" half of reliability
+    // tracking only; see fulfillsPromise's doc comment for why the "broken"
+    // half (deadline expiry) isn't wired.
+    if (action.fulfillsPromise) {
+      _resolvePendingInteraction(rel, InteractionType.promise);
+      rel.reliability = nudgeReliability(rel.reliability);
+      rel.trust = (rel.trust + 0.5).clamp(0, 100);
+    }
+
+    // Whatever this reply establishes about the player becomes a durable,
+    // keyed fact — see recordFact()'s doc comment for repeated-vs-
+    // contradicting-value handling. Surfaced to planResponse() below when it
+    // actually contradicts something — only the first one, if an action
+    // somehow establishes more than one fact and more than one contradicts;
+    // no current content does that, so ResponsePlan carrying just one is a
+    // real (if currently theoretical) limitation, not an oversight.
+    ContradictionEvent? contradiction;
+    action.establishesFacts?.forEach((key, value) {
+      contradiction ??= recordFact(rel.facts, key, value, myTurn);
+    });
+
     final turnImportance = _conversationImportance(action.conversationIntent);
     rel.recentConversation.add(ConversationEvent(
       intent: action.conversationIntent,
@@ -1884,11 +2157,52 @@ class CareerController extends ChangeNotifier {
       return;
     }
 
+    // Response planning (Phase 5): decide what KIND of reply this is before
+    // searching for a specific line — see planResponse()'s own doc comment
+    // for the priority order it applies. Spam/daily-repeat below stay a
+    // separate pre-check rather than folding into the plan: piling onto the
+    // same message twice isn't a conversational "kind of move" the way
+    // answering a question or telling a joke is — it's Mama reacting to the
+    // repetition itself, which is why it already short-circuited pool choice
+    // before ResponseIntent existed, and still does.
+    final questionJustAnswered = questionWasPending && resolved.answered;
+    final topicJustChanged = previousTopic != null && rel.currentTopic != null && rel.currentTopic != previousTopic;
+    final hasCallbackOpportunity = rel.recentConversation.any(
+      (e) =>
+          e.topic == rel.currentTopic &&
+          e.turn < myTurn &&
+          (e.importance == MemoryImportance.medium || e.importance == MemoryImportance.high),
+    );
+    final plan = planResponse(
+      actionIntent: action.conversationIntent,
+      questionJustAnswered: questionJustAnswered,
+      questionJustAsked: action.intent == Intent.question,
+      thread: rel.thread,
+      topicJustChanged: topicJustChanged,
+      hasCallbackOpportunity: hasCallbackOpportunity,
+      contradiction: contradiction,
+      rng: _rng,
+    );
+    rel.lastResponsePlan = plan;
+
     // Reaction pool priority:
     //   1. spamReactions      — same action sent back-to-back (≥2 times)
     //   2. dailyRepeatReactions — same action sent again later today (≥2 times, not consecutive)
     //   3. tone shift lines   — sudden register change the character calls out
     //   4. normal tone pool   — default per-tone reaction lines
+    //
+    // planResponse()'s ResponseIntent doesn't hard-narrow the pool the way
+    // tone-shift does — unlike a tone shift (rare, always worth calling out),
+    // ResponseIntent.answerQuestion fires on nearly every question-asking
+    // turn, so hard-narrowing to only acknowledgesAnsweredQuestion-tagged
+    // lines would exclude the entire existing, already-tuned pool of
+    // question-answering content whenever a question is simply asked or
+    // answered — a real regression caught by this session's own test suite.
+    // It drives pickLine's scoring instead, via answeredQuestionMatch inside
+    // _finalWeight (DialogueContext.questionJustAnswered below) — the same
+    // soft-nudge treatment dodgeMatch/recallMatch already use for their own
+    // equally-common signals; only a genuinely rare event like a tone shift
+    // earns a hard override.
     //
     // Escalation: prolonged spam (≥5 back-to-back) irritates the character
     // enough that they stop replying to that message entirely. A mood hit is
@@ -1910,14 +2224,33 @@ class CareerController extends ChangeNotifier {
       return;
     }
 
-    // Intent-specific reactions (Mama only) slot in as a 4th override tier,
-    // between the daily-repeat pool and the generic per-tone pool — same
-    // priority-ladder pattern as spam/dailyRepeat above, not a blend with the
-    // generic pool. Falls straight through to the generic pool whenever the
-    // intent has no entries for the tone actually picked, so a thin intent
-    // bucket never dead-ends the reaction.
+    // Intent-specific reactions (Mama and Vale only, so far) slot in as a 4th
+    // override tier, between the daily-repeat pool and the generic per-tone
+    // pool — same priority-ladder pattern as spam/dailyRepeat above, not a
+    // blend with the generic pool. Falls straight through to the generic
+    // pool whenever the intent has no entries for the tone actually picked
+    // (or the contact has no intent-reaction map at all yet), so a thin
+    // intent bucket never dead-ends the reaction.
+    final intentReactions = switch (contactId) {
+      'mama' => kMamaIntentReactions,
+      'partner' => kValeIntentReactions,
+      _ => const <ConversationIntent, Map<ReplyTone, List<DialogueLine>>>{},
+    };
     final intentPool = (!isConsecutiveSpam && !isDailyRepeat && action.conversationIntent != null)
-        ? (kMamaIntentReactions[action.conversationIntent]?[action.tone] ?? const <DialogueLine>[])
+        ? (intentReactions[action.conversationIntent]?[action.tone] ?? const <DialogueLine>[])
+        : const <DialogueLine>[];
+
+    // A contradiction is rare enough (unlike ResponseIntent.answerQuestion,
+    // which fires on nearly every question-asking turn — see
+    // answeredQuestionMatch's doc comment for why THAT one is a soft nudge,
+    // not a pool override) that hard-routing to dedicated content when one
+    // fires is safe: it can't crowd out an entire existing pool the way
+    // over-eager narrowing did in Phase 5, since a fact contradiction only
+    // exists at all when the player's own action establishes a fact that
+    // conflicts with one already on record. Mama-only for now, same as
+    // kMamaMoneyAskReactions — the reaction text is written in her voice.
+    final contradictionPool = (contactId == 'mama' && !isConsecutiveSpam && !isDailyRepeat && plan.contradiction != null)
+        ? (kMamaContradictionReactions[plan.intent] ?? const <DialogueLine>[])
         : const <DialogueLine>[];
 
     final List<DialogueLine>? reactionPool;
@@ -1925,6 +2258,8 @@ class CareerController extends ChangeNotifier {
       reactionPool = spamPool;
     } else if (isDailyRepeat) {
       reactionPool = dailyPool;
+    } else if (contradictionPool.isNotEmpty) {
+      reactionPool = contradictionPool;
     } else if (intentPool.isNotEmpty) {
       reactionPool = intentPool;
     } else {
@@ -1965,11 +2300,16 @@ class CareerController extends ChangeNotifier {
         playerTopics: action.topics,
         playerIntent: action.intent,
         questionJustDodged: dodgedNow,
+        questionJustAnswered: questionJustAnswered,
         toneShift: toneShifted,
         playerTopicsToday: rel.topicsDiscussedToday,
         consecutiveActionCount: rel.consecutiveActionCount,
         levelPhase: turnPhase,
         recentConversation: rel.recentConversation,
+        facts: rel.facts,
+        honesty: rel.honesty,
+        reliability: rel.reliability,
+        responsiveness: rel.responsiveness,
       );
       final reaction = pickLine(
         _rng,
@@ -1995,7 +2335,10 @@ class CareerController extends ChangeNotifier {
         );
         // Mama just asked something new — the player's next reply is what
         // resolves it (answered or dodged), so it isn't "answered" yet.
-        if (reaction.intent == Intent.question) rel.lastQuestionAnswered = false;
+        if (reaction.intent == Intent.question) {
+          rel.lastQuestionAnswered = false;
+          _openPendingInteraction(rel, type: InteractionType.question, topic: reaction.topic, subject: reaction.subject);
+        }
       } else {
         // Every line in `pool` got gated out for the current relationship
         // state — rather than silently sending nothing (indistinguishable
@@ -2010,6 +2353,10 @@ class CareerController extends ChangeNotifier {
         }
       }
     }
+
+    // How promptly this reply came, before the counter resets below — see
+    // nudgeResponsiveness's doc comment for the <=1/>=3 thresholds.
+    rel.responsiveness = nudgeResponsiveness(rel.responsiveness, rel.daysSinceReply);
 
     rel.daysSinceReply = 0;
     rel.unread = false;
@@ -2050,6 +2397,13 @@ class CareerController extends ChangeNotifier {
         final coldCount = rel.recentTones.where((t) => t == ReplyTone.cold || t == ReplyTone.excuse).length;
         if (warmCount >= 3) rel.warmthOffset = (rel.warmthOffset + 0.3).clamp(-15, 15);
         if (coldCount >= 3) rel.warmthOffset = (rel.warmthOffset - 0.3).clamp(-15, 15);
+        // Behavioral reputation (Phase 9): honesty, same mechanism/cadence
+        // as warmthOffset just above — a sustained pattern in
+        // recentTones, not a single turn. See nudgeHonesty's doc comment
+        // for why this deliberately mirrors warmthOffset instead of
+        // introducing a second, competing definition of "repeated".
+        final honestCount = rel.recentTones.where((t) => t == ReplyTone.honest).length;
+        rel.honesty = nudgeHonesty(rel.honesty, honestCount);
       }
       rel.mood = decayMood(rel.mood, baselineAttraction: baselineAttraction(p.personalityWarmth + rel.warmthOffset));
       rel.fear = decayMood(rel.fear);
@@ -2161,14 +2515,23 @@ class CareerController extends ChangeNotifier {
             // Mama raising a topic starts (or continues) a thread the
             // player's next reply can build on — see advanceTopic(). A
             // generic, untagged line leaves whatever thread was already
-            // active alone.
+            // active alone. Always a fresh stage-1 start rather than routing
+            // through advanceTopic() itself — Mama raising something
+            // unprompted is always a new beat, never a deepening of turns the
+            // player didn't just contribute to.
             if (line.topic != null) {
               rel.currentTopic = line.topic;
               rel.topicProgress = 1;
+              rel.topicSubject = line.resolvesThread ? null : line.subject;
+              rel.topicUnresolved = !line.resolvesThread;
+              rel.topicTurnsActive = 1;
             }
             // Same as the reaction path: mama asking something unprompted
             // leaves it awaiting the player's reply.
-            if (line.intent == Intent.question) rel.lastQuestionAnswered = false;
+            if (line.intent == Intent.question) {
+              rel.lastQuestionAnswered = false;
+              _openPendingInteraction(rel, type: InteractionType.question, topic: line.topic, subject: line.subject);
+            }
           }
         }
       }

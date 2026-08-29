@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart' hide TimeOfDay;
+import 'package:flutter/services.dart' show FilteringTextInputFormatter, LengthLimitingTextInputFormatter;
 import '../theme.dart';
 import '../controller.dart';
 import '../conversation/intents.dart';
@@ -134,11 +135,99 @@ class _PersonalThreadScreenState extends State<PersonalThreadScreen> {
                   g.sendIntent(contactId, option.intent);
                 } else if (option is StoryChipOption) {
                   g.personalReplyAction(contactId, option.action);
+                } else if (option is MoneyAskChipOption) {
+                  _showAskForMoneyDialog(context, g, contactId);
                 }
               },
             ),
         ]),
       ),
+    );
+  }
+}
+
+/// "(Ask for Money)" flow — the one reply option that needs a real number
+/// from the player instead of a pre-written phrasing, so it opens this
+/// dialog rather than sending immediately like every other chip. Handing off
+/// to [CareerController.resolveMoneyAsk] once a positive amount is entered.
+void _showAskForMoneyDialog(BuildContext context, CareerController g, String contactId) {
+  final c = AppColors.of(context);
+  showDialog(
+    context: context,
+    builder: (ctx) => Dialog(
+      backgroundColor: c.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18), side: BorderSide(color: c.line)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+      child: _AskForMoneyDialogBody(
+        onSend: (amount) {
+          g.resolveMoneyAsk(contactId, amount);
+          Navigator.pop(ctx);
+        },
+      ),
+    ),
+  );
+}
+
+class _AskForMoneyDialogBody extends StatefulWidget {
+  final void Function(int amount) onSend;
+  const _AskForMoneyDialogBody({required this.onSend});
+  @override
+  State<_AskForMoneyDialogBody> createState() => _AskForMoneyDialogBodyState();
+}
+
+class _AskForMoneyDialogBodyState extends State<_AskForMoneyDialogBody> {
+  final _controller = TextEditingController();
+  int? _amount;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Ask Mamá for money', style: AppText.sans(size: 18, weight: FontWeight.w700, color: c.ink)),
+        const SizedBox(height: 10),
+        Text('How much do you need?', style: AppText.sans(size: 13.5, weight: FontWeight.w500, color: c.inkSoft, height: 1.5)),
+        const SizedBox(height: 14),
+        Container(
+          decoration: BoxDecoration(color: c.sunken, borderRadius: BorderRadius.circular(12), border: Border.all(color: c.line)),
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Row(children: [
+            Text('\$', style: AppText.sans(size: 16, weight: FontWeight.w600, color: c.inkFaint)),
+            const SizedBox(width: 4),
+            Expanded(
+              child: TextField(
+                controller: _controller,
+                autofocus: true,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(6)],
+                style: AppText.sans(size: 16, weight: FontWeight.w600, color: c.ink),
+                decoration: InputDecoration(border: InputBorder.none, hintText: '0', hintStyle: AppText.sans(size: 16, weight: FontWeight.w600, color: c.inkFaint)),
+                onChanged: (v) => setState(() => _amount = int.tryParse(v)),
+              ),
+            ),
+          ]),
+        ),
+        const SizedBox(height: 18),
+        Row(children: [
+          Expanded(child: AppButton(kind: BtnKind.ghost, full: true, height: 48, onTap: () => Navigator.pop(context), child: const Text('Cancel'))),
+          const SizedBox(width: 10),
+          Expanded(
+            child: AppButton(
+              full: true,
+              height: 48,
+              onTap: (_amount != null && _amount! > 0) ? () => widget.onSend(_amount!) : null,
+              child: const Text('Send'),
+            ),
+          ),
+        ]),
+      ]),
     );
   }
 }

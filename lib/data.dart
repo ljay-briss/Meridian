@@ -315,6 +315,19 @@ class RelationshipState {
   double fear = 0; // 0..100, decays toward 0 every tick — see nudgeFear()
   double respect = 0; // 0..100, sticky — see nudgeRespect()
   double debt = 0; // 0..100, sticky — see nudgeDebt()
+  // Behavioral-reputation axes (Phase 9) — driven by a sustained PATTERN
+  // across turns, not by any single line the way mood/trust/suspicion/fear/
+  // respect/debt already are. Start at 50 (neutral, nothing observed yet),
+  // matching trust/closeness's convention rather than suspicion/fear/
+  // respect/debt's absence-based 0.
+  double honesty = 50; // nudged from _tickPersonalRelationships, same cadence/mechanism as warmthOffset — see nudgeHonesty()
+  double reliability = 50; // nudged when a promise is explicitly fulfilled — see nudgeReliability()
+  double responsiveness = 50; // nudged from daysSinceReply at the moment of replying — see nudgeResponsiveness()
+  // How many turns in a row the player has dodged a pending question —
+  // resets to 0 on any non-dodge turn. Can't reuse recentTones the way
+  // honesty does (a dodge isn't a ReplyTone); drives
+  // nudgeSuspicionFromDodgePattern().
+  int consecutiveDodgeCount = 0;
   int betrayalCount = 0; // backfired-excuse count; trust<15 && this>=2 triggers isBlocked
   bool isBlocked = false; // block consequence fired — ignores further replies/initiative
   int daysSinceReply = 0;
@@ -330,7 +343,89 @@ class RelationshipState {
   final List<String> recentLineHistory = []; // pickLine() variety scoring — last 5 lines sent, any pool
   Topic? currentTopic; // the topic this conversation thread is presently on — see advanceTopic()
   int topicProgress = 0; // turns spent on currentTopic; 0 when there's no active thread
+  // Finer-grained "what specifically" within currentTopic — e.g. "rent" or
+  // "debt" within Topic.money, distinguishing threads a bare Topic can't tell
+  // apart on its own. Null until a reply/line declares one (see
+  // PersonalReplyAction.subject / DialogueLine.subject); cleared whenever the
+  // topic itself changes, same as topicProgress resetting to a fresh stage 1.
+  String? topicSubject;
+  // Whether the current topic/subject still needs addressing. Starts true
+  // whenever a thread (re)opens; cleared only by a reply/line that explicitly
+  // marks itself as resolving it (PersonalReplyAction.resolvesThread /
+  // DialogueLine.resolvesThread) — reopens on any further on-topic turn that
+  // doesn't itself resolve it. Named with the topic prefix, not bare
+  // "unresolved", so it reads distinctly from the unrelated whole-relationship
+  // [resolved] below (that one means the relationship's story arc concluded;
+  // this one means the currently-open subject hasn't been settled).
+  bool topicUnresolved = true;
+  // How many turns currentTopic has been open, counted on EVERY turn it's
+  // live — including turns that don't advance topicProgress (an off-topic
+  // aside doesn't reset this the way an actual topic switch does). Distinct
+  // from topicProgress, which only counts on-topic hits: this counts elapsed
+  // time the thread has been sitting open at all, so "2 exchanges deep" and
+  // "open for 6 turns but only addressed twice" are both representable.
+  int topicTurnsActive = 0;
   bool lastQuestionAnswered = true; // false while a mama-asked Intent.question line is awaiting a real reply
+  // Unified tracking for questions/requests/promises left hanging — see
+  // PendingInteraction's doc comment. Additive alongside lastQuestionAnswered
+  // above, not a replacement for it: that boolean and resolvePendingQuestion's
+  // dodge-detection stay exactly as they were (dodgeMatch depends on them),
+  // this just also records the richer (topic, subject, createdTurn) shape for
+  // the two kinds — request, promise — that had no tracking at all before.
+  final List<PendingInteraction> pendingInteractions = [];
+
+  /// Keyed, durable facts Mama actually knows about the player — see
+  /// [ConversationFact]'s doc comment for how this differs from
+  /// [recentConversation] above (that's "a kind of thing was said"; this is
+  /// "the specific content of what it was"). Populated via recordFact() from
+  /// [PersonalReplyAction.establishesFacts]/[DialogueLine.establishesFacts]
+  /// when the player sends something that establishes one. Unlike
+  /// [recentConversation]/[pendingInteractions], nothing prunes or caps this
+  /// — a fact, once established, doesn't age out the way a recent turn does.
+  final Map<String, ConversationFact> facts = {};
+
+  /// [currentTopic]/[topicProgress]/[topicSubject]/[topicUnresolved]/
+  /// [topicTurnsActive] bundled into one [ConversationThread] — a computed
+  /// VIEW, not a new field: those five loose fields stay the actual source
+  /// of truth (every read/write site already uses them directly, including
+  /// [recentConversation] below, so wrapping them wholesale would mean
+  /// migrating all of that for no behavioral gain). This exists purely for
+  /// callers — [ResponsePlan], namely — that want to hand one object around
+  /// instead of five values. `null` when there's no active thread.
+  /// [ConversationThread.playerInitiated] is a best-effort lookup: the
+  /// oldest still-in-window [recentConversation] entry on this topic tells
+  /// you who raised it, but that entry ages out of the window like any
+  /// other, so a thread that's been open a long time may fall back to
+  /// `false` once its opening turn is no longer remembered.
+  ConversationThread? get thread {
+    final topic = currentTopic;
+    if (topic == null) return null;
+    final onTopic = recentConversation.where((e) => e.topic == topic);
+    final opened = onTopic.isEmpty ? null : onTopic.reduce((a, b) => a.turn < b.turn ? a : b);
+    return ConversationThread(
+      topic: topic,
+      subject: topicSubject,
+      stage: topicProgress,
+      turnsActive: topicTurnsActive,
+      unresolved: topicUnresolved,
+      playerInitiated: opened?.fromMe ?? false,
+    );
+  }
+
+  /// The [ResponsePlan] CareerController.personalReplyAction computed for
+  /// the most recent turn — see planResponse()'s doc comment. Only
+  /// [ResponsePlan.intent] == [ResponseIntent.answerQuestion] currently
+  /// changes selection at all, and it does that as a soft scoring nudge
+  /// (answeredQuestionMatch), not by narrowing the pool the way tone-shift
+  /// does — ResponseIntent.answerQuestion fires on nearly every
+  /// question-asking turn, so hard-narrowing it the same way would exclude
+  /// the entire existing, already-tuned pool of question-answering content
+  /// (a real regression this session caught via its own test suite before
+  /// shipping it). Stored here regardless, the same way topicUnresolved/
+  /// topicTurnsActive were added before every possible consumer existed —
+  /// genuinely inspectable/testable state now, available for a future
+  /// selection step to read without recomputing it.
+  ResponsePlan? lastResponsePlan;
 
   // Spam / repetition tracking.
   String? lastActionLabel; // label of the most-recent player action
@@ -339,6 +434,13 @@ class RelationshipState {
   // Within-day memory — cleared each morning tick.
   final Map<String, int> todayActionCounts = {}; // label → how many times sent today
   final Set<Topic> topicsDiscussedToday = {}; // topics the player has brought up today
+
+  // Within-week memory — cleared at CareerController's week boundary
+  // ((day - 1) % 7 == 0 in _advanceDay()). Caps the Mama "(Ask for Money)"
+  // flow (see CareerController.kMaxMoneyAsksPerWeek/resolveMoneyAsk), the
+  // only personal-thread action that grants real cash, so it needs a harder
+  // limit than the per-day counter above provides.
+  int moneyAsksThisWeek = 0;
 
   // ── Short-term conversation memory (intent-chip system) ──────────────────
   int turnCount = 0; // increments once per personalReplyAction() call — drives recallWithinTurns/turn-granularity freshness, distinct from the game's day/TimeOfDay tick
@@ -436,6 +538,35 @@ class PersonalReplyAction {
   /// kMamaIntentReactions when this is non-null.
   final ConversationIntent? conversationIntent;
 
+  /// Finer-grained "what specifically" within [topics] — e.g. "rent" or
+  /// "debt" within Topic.money — fed into RelationshipState.topicSubject via
+  /// advanceTopic(). Null (the default, and every entry below until
+  /// specifically narrowed) means this action doesn't narrow the topic any
+  /// further than [topics] already does.
+  final String? subject;
+
+  /// True if sending this action should close out the current topic/subject
+  /// as addressed — clears RelationshipState.topicSubject/topicUnresolved via
+  /// advanceTopic(). Default false: most replies continue a thread rather
+  /// than closing it out.
+  final bool resolvesThread;
+
+  /// Keyed facts sending this action establishes about the player — e.g.
+  /// `{'coverJob': 'driving'}` — recorded into RelationshipState.facts via
+  /// recordFact() (see its own doc comment for how a repeated vs.
+  /// contradicting value is handled). Null (the default, and every entry
+  /// below until specifically authored) means this action establishes
+  /// nothing; most replies don't.
+  final Map<String, String>? establishesFacts;
+
+  /// True if sending this action resolves an outstanding promise-type
+  /// PendingInteraction as KEPT — bumps RelationshipState.reliability/trust
+  /// via nudgeReliability() (see its doc comment). The "broken" half
+  /// (a promise going unresolved past some deadline) isn't wired — see
+  /// PendingInteraction's own doc comment. Default false: most replies
+  /// aren't "I followed through on what I said."
+  final bool fulfillsPromise;
+
   const PersonalReplyAction(
     this.label,
     this.text, {
@@ -445,6 +576,10 @@ class PersonalReplyAction {
     this.intensity = 0.5,
     this.isDebtTopic = false,
     this.conversationIntent,
+    this.subject,
+    this.resolvesThread = false,
+    this.establishesFacts,
+    this.fulfillsPromise = false,
     this.allowedContacts,
     this.textMorning,
     this.textEvening,
@@ -508,6 +643,9 @@ const List<PersonalReplyAction> kPersonalReplyActions = [
     textWhenHighMood: "I'm good, I promise. Take care of yourself too. ❤️",
   ),
   PersonalReplyAction('Be honest', "Honestly? Here's what's going on.", tone: ReplyTone.honest, intent: Intent.statement, intensity: 0.5),
+  // Phase 9's reliability example — the "kept" half of a promise, see
+  // PersonalReplyAction.fulfillsPromise's doc comment.
+  PersonalReplyAction('Followed through', "Told you I'd handle it. I did.", tone: ReplyTone.honest, intent: Intent.statement, intensity: 0.5, fulfillsPromise: true),
   PersonalReplyAction(
     'Ask how they are', 'How are you doing?',
     tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.question, intensity: 0.4,
@@ -590,7 +728,7 @@ const List<PersonalReplyAction> kPersonalReplyActions = [
   ),
   PersonalReplyAction(
     'Share something good', "Something actually went right today. Feels weird to say.",
-    tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.5,
+    tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.5,
     allowedContacts: {'mama'},
     showWhenLevelMax: 3,
     showWhenMoodAbove: 10,
@@ -684,6 +822,8 @@ const List<PersonalReplyAction> kPersonalReplyActions = [
 /// (picked with the same avoid-repeat rule as everything else) instead of one
 /// fixed line. A flat, unvarying line here is the fastest way for the whole
 /// system to read as robotic, no matter how much variety exists elsewhere.
+bool _playerAskedAQuestion(DialogueContext ctx) => ctx.playerIntent == Intent.question;
+
 const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
   'mama': {
     ReplyTone.warm: [
@@ -833,21 +973,21 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
       DialogueLine("That means everything to me, mijo. Family first. Always.", weight: 1.8, topic: Topic.family),
       DialogueLine("I'm glad you feel that way. Never forget where you come from.", weight: 1.5, topic: Topic.family),
 
-      // WELLBEING ──────────────────────────────────────────────────────────────
-      DialogueLine("Ohhh, tell me about it! What happened?", weight: 3.0, topic: Topic.wellbeing),
-      DialogueLine("Wait — something went right? Don't stop there, mijo. Tell me everything.", weight: 3.0, topic: Topic.wellbeing),
-      DialogueLine("Oh yeah? I want to hear this. What happened?", weight: 2.8, topic: Topic.wellbeing),
-      DialogueLine("Something went right? Okay, I need details. Talk to me.", weight: 2.5, topic: Topic.wellbeing),
-      DialogueLine("Really?! See — I told you things would turn around. Now tell me.", weight: 2.5, topic: Topic.wellbeing),
-      DialogueLine("Mijo, don't leave me hanging. What is it?", weight: 2.5, topic: Topic.wellbeing),
-      DialogueLine("That's what I like to hear. Now keep going — what went right?", weight: 2.2, topic: Topic.wellbeing),
-      DialogueLine("Okay good. Now sit down and tell your mother everything.", weight: 2.2, topic: Topic.wellbeing),
-      DialogueLine("You're holding back. Don't. I want to hear every bit of it.", weight: 2.0, topic: Topic.wellbeing),
-      DialogueLine("You always undersell the good things. Tell me properly, mijo.", weight: 2.0, topic: Topic.wellbeing),
-      // wellbeing receiving
-      DialogueLine("I'm relieved to hear that. You had me so worried, mijo.", weight: 1.5, topic: Topic.wellbeing),
-      DialogueLine("Good. That's all I ever want — to know you're okay.", weight: 1.5, topic: Topic.wellbeing),
-      DialogueLine("You don't know how much I needed to hear that. Please take care of yourself.", weight: 1.3, topic: Topic.wellbeing),
+      // GOOD NEWS ──────────────────────────────────────────────────────────────
+      DialogueLine("Ohhh, tell me about it! What happened?", weight: 3.0, topic: Topic.goodNews),
+      DialogueLine("Wait — something went right? Don't stop there, mijo. Tell me everything.", weight: 3.0, topic: Topic.goodNews),
+      DialogueLine("Oh yeah? I want to hear this. What happened?", weight: 2.8, topic: Topic.goodNews),
+      DialogueLine("Something went right? Okay, I need details. Talk to me.", weight: 2.5, topic: Topic.goodNews),
+      DialogueLine("Really?! See — I told you things would turn around. Now tell me.", weight: 2.5, topic: Topic.goodNews),
+      DialogueLine("Mijo, don't leave me hanging. What is it?", weight: 2.5, topic: Topic.goodNews),
+      DialogueLine("That's what I like to hear. Now keep going — what went right?", weight: 2.2, topic: Topic.goodNews),
+      DialogueLine("Okay good. Now sit down and tell your mother everything.", weight: 2.2, topic: Topic.goodNews),
+      DialogueLine("You're holding back. Don't. I want to hear every bit of it.", weight: 2.0, topic: Topic.goodNews),
+      DialogueLine("You always undersell the good things. Tell me properly, mijo.", weight: 2.0, topic: Topic.goodNews),
+      // good news receiving
+      DialogueLine("I'm relieved to hear that. You had me so worried, mijo.", weight: 1.5, topic: Topic.goodNews),
+      DialogueLine("Good. That's all I ever want — to know you're okay.", weight: 1.5, topic: Topic.goodNews),
+      DialogueLine("You don't know how much I needed to hear that. Please take care of yourself.", weight: 1.3, topic: Topic.goodNews),
 
       // AFFECTION ──────────────────────────────────────────────────────────────
       DialogueLine("Mijo... don't stop there. Say more.", weight: 3.0, topic: Topic.affection),
@@ -907,6 +1047,11 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
       DialogueLine("Well, I'm glad you told me. I was worried.", weight: 1.5, topic: Topic.suspicion),
       DialogueLine('Ok. I trust you. Just be careful.', weight: 1.5),
       DialogueLine('Honesty is all I ever ask for, mijo.', weight: 1.0),
+      // Gated on RelationshipState.honesty (Phase 9) — only eligible once
+      // the player has genuinely earned a reputation for it, not just this
+      // one honest reply. See nudgeHonesty()/CareerController's periodic
+      // tick for how that reputation actually builds.
+      DialogueLine("You know, you've really been good about telling me the truth lately. It means a lot.", weight: 2.0, honestyMin: 65),
       DialogueLine("Alright. If that's what's going on, I understand.", weight: 1.0),
       DialogueLine('I appreciate you telling me the truth. It makes me feel better.', weight: 1.5),
       DialogueLine("That's my boy. Always honest.", weight: 1.5),
@@ -953,23 +1098,37 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
       // direct question deserves a direct answer instead of a generic
       // acknowledgment. Stage 2 turns the check-in toward worry, handing off
       // naturally into the suspicion/concern thread below.
+      //
+      // These are Mama answering FOR HERSELF — only coherent when the player
+      // actually asked how she's doing. Gated with `when` (not just topic)
+      // because every one of them shares the same flaw: without this gate,
+      // pickLine()'s topic-tiering (dialogue_engine.dart) would correctly
+      // narrow to "Topic.wellbeing, honest" and then be stuck choosing among
+      // ONLY these five self-report lines even when the player said
+      // something like "Made a mistake at work, won't happen again." —
+      // topic-matched but a non-sequitur, since none of them address a
+      // statement/confession. See the "Reacting to the player's own
+      // wellbeing" block below for that half of Topic.wellbeing.
       DialogueLine(
         "I'm doing well, mijo. Just been thinking about you a lot. Tell me what's new with you?",
         weight: 2.0,
         topic: Topic.wellbeing,
         intent: Intent.question,
+        when: _playerAskedAQuestion,
       ),
       DialogueLine(
         "I'm alright, mijo. Keeping busy. How about you, really?",
         weight: 1.6,
         topic: Topic.wellbeing,
         intent: Intent.question,
+        when: _playerAskedAQuestion,
       ),
       DialogueLine(
         "I'm good, mijo. Better now that I'm hearing from you. What's going on with you?",
         weight: 1.5,
         topic: Topic.wellbeing,
         intent: Intent.question,
+        when: _playerAskedAQuestion,
       ),
       DialogueLine(
         "I'm alright, mijo. Just worried about you. You've been distant lately.",
@@ -977,6 +1136,7 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
         topic: Topic.wellbeing,
         intent: Intent.question,
         progressionMin: 2,
+        when: _playerAskedAQuestion,
       ),
       DialogueLine(
         "I'm fine, mijo, don't worry about me. I just wish you'd tell me more.",
@@ -984,7 +1144,21 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
         topic: Topic.wellbeing,
         intent: Intent.question,
         progressionMin: 2,
+        when: _playerAskedAQuestion,
       ),
+      // Reacting to the player's own wellbeing — a statement or confession
+      // about themselves (a mistake, a close call, exhaustion, being in over
+      // their head), as opposed to the block above (Mama answering about
+      // HERSELF). No intent tag: these are meant to fit either
+      // Intent.statement or Intent.confession, both of which "Slipped up" /
+      // "Messed up at work" / "Close call" / "In deep" and similar chips use.
+      DialogueLine("Mistakes happen, mijo. Just don't make a habit of it.", weight: 1.6, topic: Topic.wellbeing),
+      DialogueLine("Okay. As long as you're being careful and learning from it.", weight: 1.5, topic: Topic.wellbeing),
+      DialogueLine("That's what worries me, mijo. Please, just be careful out there.", weight: 1.7, topic: Topic.wellbeing),
+      DialogueLine("I'm glad you're okay. That's really all that matters to me right now.", weight: 1.6, topic: Topic.wellbeing, acknowledgesAnsweredQuestion: true),
+      DialogueLine("You need to actually rest, mijo, not just push through it.", weight: 1.4, topic: Topic.wellbeing),
+      DialogueLine("That's a heavy thing to carry. I'm glad you told me instead of hiding it.", weight: 1.6, topic: Topic.wellbeing, acknowledgesAnsweredQuestion: true),
+      DialogueLine("Whatever it is, you don't have to carry it alone. I'm here.", weight: 1.5, topic: Topic.wellbeing),
       // Suspicion/concern-topic answers — mama naming and then unpacking a
       // specific worry over consecutive turns, instead of a flat vague/cold
       // deflection every time.
@@ -1054,6 +1228,15 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
       DialogueLine("New job, huh? I hope it treats you better than the last one.", weight: 1.8, topic: Topic.plans),
       DialogueLine("Well, don't leave your mother in suspense. What is it exactly?", weight: 1.8, topic: Topic.plans),
       DialogueLine("Still figuring it out is fine, mijo, just don't disappear on me while you do.", weight: 1.6, topic: Topic.plans),
+      // Gated on ConversationFact 'coverJob' = 'driving' (Phase 6) — only
+      // eligible once Mama actually knows that much, via the elaborate
+      // chip's matching phrasing in conversation/intents.dart.
+      DialogueLine(
+        "Driving all day, huh? At least you're out and about, not stuck behind some desk.",
+        weight: 2.4,
+        topic: Topic.plans,
+        requiredFacts: {'coverJob': 'driving'},
+      ),
 
       // FAMILY
       DialogueLine("Family — what happened? Who? Tell me everything.", weight: 3.0, topic: Topic.family),
@@ -1065,12 +1248,12 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
       // family receiving
       DialogueLine("Family is everything, mijo. Don't ever lose sight of that.", weight: 1.8, topic: Topic.family),
 
-      // WELLBEING
-      DialogueLine("Oh yeah? Something went right? Okay, tell me. What happened?", weight: 3.0, topic: Topic.wellbeing),
-      DialogueLine("Sounds like good news. I'll take it. Tell me more.", weight: 2.8, topic: Topic.wellbeing),
-      DialogueLine("Something went right — okay. What exactly? Don't undersell it.", weight: 2.5, topic: Topic.wellbeing),
-      DialogueLine("That's progress. Tell me what it was.", weight: 2.5, topic: Topic.wellbeing),
-      DialogueLine("You're being modest. That means it's actually good. Tell me.", weight: 2.2, topic: Topic.wellbeing),
+      // GOOD NEWS
+      DialogueLine("Oh yeah? Something went right? Okay, tell me. What happened?", weight: 3.0, topic: Topic.goodNews),
+      DialogueLine("Sounds like good news. I'll take it. Tell me more.", weight: 2.8, topic: Topic.goodNews),
+      DialogueLine("Something went right — okay. What exactly? Don't undersell it.", weight: 2.5, topic: Topic.goodNews),
+      DialogueLine("That's progress. Tell me what it was.", weight: 2.5, topic: Topic.goodNews),
+      DialogueLine("You're being modest. That means it's actually good. Tell me.", weight: 2.2, topic: Topic.goodNews),
 
       // SUSPICION
       // A) Mama receiving player's concern about her — honest, a little guarded
