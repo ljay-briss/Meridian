@@ -40,8 +40,8 @@ class CollectorScreen extends StatelessWidget {
           kind: BtnKind.dark,
           full: true,
           height: 50,
-          onTap: allResolved ? g.reportToBoss : null,
-          child: const Text('Report to the boss'),
+          onTap: allResolved && !g.collectorBusy ? g.reportToBoss : null,
+          child: Text(g.collectorBusy ? 'On the road…' : 'Report to the boss'),
         ),
       ],
     );
@@ -73,16 +73,16 @@ class _TargetCard extends StatelessWidget {
           Text('"${g.targetExcuse[target.id]}"', style: AppText.sans(size: 13, weight: FontWeight.w500, color: c.inkSoft, height: 1.4)),
           const SizedBox(height: 10),
           Row(children: [
-            Expanded(child: AppButton(kind: BtnKind.ghost, full: true, onTap: () => g.threaten(target.id), child: const Text('Threaten'))),
+            Expanded(child: AppButton(kind: BtnKind.ghost, full: true, onTap: g.collectorBusy ? null : () => g.threaten(target.id), child: const Text('Threaten'))),
             const SizedBox(width: 8),
-            Expanded(child: AppButton(kind: BtnKind.ghost, full: true, onTap: () => _vandalizeSheet(context, g, target), child: const Text('Vandalize'))),
+            Expanded(child: AppButton(kind: BtnKind.ghost, full: true, onTap: g.collectorBusy ? null : () => _vandalizeSheet(context, g, target), child: const Text('Vandalize'))),
           ]),
         ] else if (state == 'refused') ...[
           const SizedBox(height: 10),
-          AppButton(kind: BtnKind.ghost, full: true, onTap: () => _vandalizeSheet(context, g, target), child: const Text('Vandalize')),
+          AppButton(kind: BtnKind.ghost, full: true, onTap: g.collectorBusy ? null : () => _vandalizeSheet(context, g, target), child: const Text('Vandalize')),
         ] else if (state == 'pending') ...[
           const SizedBox(height: 10),
-          AppButton(kind: BtnKind.dark, full: true, onTap: () => g.visit(target.id), child: const Text('Visit')),
+          AppButton(kind: BtnKind.dark, full: true, onTap: g.collectorBusy ? null : () => g.visit(target.id), child: Text(g.collectorBusy ? 'On the road…' : 'Visit')),
         ],
       ]),
     );

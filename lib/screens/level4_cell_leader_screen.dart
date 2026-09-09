@@ -48,7 +48,13 @@ class CellLeaderScreen extends StatelessWidget {
             const SizedBox(height: 10),
           ],
           const SizedBox(height: 12),
-          AppButton(kind: BtnKind.dark, full: true, height: 50, onTap: g.closeMonth, child: const Text('Close out the month')),
+          AppButton(
+            kind: BtnKind.dark,
+            full: true,
+            height: 50,
+            onTap: g.level4Busy ? null : g.closeMonth,
+            child: Text(g.level4Busy ? 'Settling up…' : 'Close out the month'),
+          ),
         ],
       ],
     );

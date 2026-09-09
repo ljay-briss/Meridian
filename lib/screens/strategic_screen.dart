@@ -49,7 +49,13 @@ class StrategicScreen extends StatelessWidget {
         else if (g.strategicEvent != null)
           _EventCard(g: g, c: c)
         else ...[
-          AppButton(kind: BtnKind.dark, full: true, height: 50, onTap: g.advanceStrategicCycle, child: const Text('Advance the month')),
+          AppButton(
+            kind: BtnKind.dark,
+            full: true,
+            height: 50,
+            onTap: g.strategicBusy ? null : g.advanceStrategicCycle,
+            child: Text(g.strategicBusy ? 'Word is still traveling…' : 'Advance the month'),
+          ),
           const SizedBox(height: 10),
           AppButton(
             kind: BtnKind.ghost,

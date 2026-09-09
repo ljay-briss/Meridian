@@ -4,31 +4,39 @@ import 'package:meridian_private/controller.dart';
 
 void main() {
   group('Level 1 — Plaza Lookout', () {
-    test('responding always rolls the next sighting immediately', () {
-      final g = CareerController();
-      addTearDown(g.dispose);
-      final firstSighting = g.sighting;
-      expect(firstSighting, isNotNull);
+    test('the road goes quiet right after answering, then the next sighting rolls after the gap', () {
+      fakeAsync((async) {
+        final g = CareerController();
+        addTearDown(g.dispose);
+        final firstSighting = g.sighting;
+        expect(firstSighting, isNotNull);
 
-      g.respond(firstSighting!.correctWord);
+        g.respond(firstSighting!.correctWord);
+        expect(g.sighting, isNull); // quiet road — nothing to report yet
+        expect(g.sightingHandled, isTrue); // not re-answerable during the gap
 
-      expect(g.sighting, isNotNull);
-      expect(g.sightingHandled, isFalse); // ready for the new sighting, not stuck showing "Sent."
+        async.elapse(const Duration(seconds: CareerController.sightingGapSeconds));
+        expect(g.sighting, isNotNull);
+        expect(g.sightingHandled, isFalse); // ready for the new sighting, not stuck showing "Sent."
+      });
     });
 
     test('the day only advances every few sightings, not on every single answer', () {
-      final g = CareerController();
-      addTearDown(g.dispose);
-      final dayBefore = g.day;
+      fakeAsync((async) {
+        final g = CareerController();
+        addTearDown(g.dispose);
+        final dayBefore = g.day;
 
-      // Answer one fewer sighting than it takes to complete a day.
-      for (var i = 0; i < CareerController.sightingsPerDay - 1; i++) {
-        g.respond(g.sighting!.correctWord);
-      }
-      expect(g.day, dayBefore); // still the same day
+        // Answer one fewer sighting than it takes to complete a day.
+        for (var i = 0; i < CareerController.sightingsPerDay - 1; i++) {
+          g.respond(g.sighting!.correctWord);
+          async.elapse(const Duration(seconds: CareerController.sightingGapSeconds));
+        }
+        expect(g.day, dayBefore); // still the same day
 
-      g.respond(g.sighting!.correctWord); // the sighting that completes the day
-      expect(g.day, dayBefore + 1);
+        g.respond(g.sighting!.correctWord); // the sighting that completes the day
+        expect(g.day, dayBefore + 1);
+      });
     });
 
     test('a wrong answer is penalized immediately (heat/suspicion), not just a strike', () {
@@ -47,14 +55,17 @@ void main() {
     });
 
     test('two wrong answers in a row ends the run', () {
-      final g = CareerController();
-      addTearDown(g.dispose);
-      for (var i = 0; i < 2 && !g.gameOver; i++) {
-        final wrong = g.sighting!.correctWord == 'bird' ? 'snake' : 'bird';
-        g.respond(wrong);
-      }
-      expect(g.gameOver, isTrue);
-      expect(g.arrested, isFalse);
+      fakeAsync((async) {
+        final g = CareerController();
+        addTearDown(g.dispose);
+        for (var i = 0; i < 2 && !g.gameOver; i++) {
+          final wrong = g.sighting!.correctWord == 'bird' ? 'snake' : 'bird';
+          g.respond(wrong);
+          if (!g.gameOver) async.elapse(const Duration(seconds: CareerController.sightingGapSeconds));
+        }
+        expect(g.gameOver, isTrue);
+        expect(g.arrested, isFalse);
+      });
     });
 
     test('the countdown ticks down once a second while a sighting is pending', () {
@@ -81,7 +92,10 @@ void main() {
         expect(g.policeHeat, greaterThan(heatBefore));
         expect(g.cartelSuspicion, greaterThan(suspicionBefore));
         expect(g.lastWarning, isNotNull);
-        expect(g.sighting, isNotNull); // a new sighting rolled automatically
+        expect(g.sighting, isNull); // quiet road during the gap, not an instant re-roll
+
+        async.elapse(const Duration(seconds: CareerController.sightingGapSeconds));
+        expect(g.sighting, isNotNull); // a new sighting rolled after the gap
       });
     });
 

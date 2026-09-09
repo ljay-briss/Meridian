@@ -1,3 +1,4 @@
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:meridian_private/controller.dart';
 import 'package:meridian_private/data.dart';
@@ -39,12 +40,15 @@ void main() {
       final g = CareerController();
       addTearDown(g.dispose);
       final seen = <String>{};
-      for (var i = 0; i < 30; i++) {
-        final before = g.threads['handler']!.length;
-        g.respond(g.sighting!.correctWord);
-        final reaction = g.threads['handler']!.sublist(before).lastWhere((m) => !m.fromMe);
-        seen.add(reaction.text);
-      }
+      fakeAsync((async) {
+        for (var i = 0; i < 30; i++) {
+          final before = g.threads['handler']!.length;
+          g.respond(g.sighting!.correctWord);
+          final reaction = g.threads['handler']!.sublist(before).lastWhere((m) => !m.fromMe);
+          seen.add(reaction.text);
+          async.elapse(const Duration(seconds: CareerController.sightingGapSeconds));
+        }
+      });
       expect(seen.length, greaterThan(1));
       for (final text in seen) {
         expect(kHandlerApprovalLines.map((l) => l.text), contains(text));

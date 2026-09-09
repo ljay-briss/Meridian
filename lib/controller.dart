@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart' hide Intent;
 import 'content/mama_reactions.dart';
 import 'content/vale_reactions.dart';
 import 'conversation/intents.dart';
+import 'conversation/reply_tray.dart';
 import 'conversation/vale_intents.dart';
 import 'data.dart';
 
@@ -26,18 +27,17 @@ class CareerController extends ChangeNotifier {
 
   // ══════════════════════════════════════════════════════════════════════
   // PLAYTEST TUNING — how many weeks/runs/months/cycles each level needs
-  // before promotion. Deliberately shortened right now so a full L1-L7 run
-  // is quick to play-test. This is meant to be the real sim's pacing (weeks
-  // and months of grind, not a handful of actions) — turn these back up once
-  // that's built. Danger/lethality tuning (strikes, catch odds, etc.) is
-  // untouched — this only controls how long each level takes to clear.
+  // before promotion. This is the real sim's pacing (weeks and months of
+  // grind, not a handful of actions). Danger/lethality tuning (strikes,
+  // catch odds, etc.) is untouched — this only controls how long each level
+  // takes to clear.
   // ══════════════════════════════════════════════════════════════════════
-  static const int kCleanWeeksToPromote = 1; // real target: 2
-  static const int kSuccessfulRunsToPromote = 2; // real target: 4
-  static const int kCollectorWeeksToPromote = 1; // real target: 3
-  static const int kMonthsAsLeaderToPromote = 2; // real target: 4
-  static const int kStrategicGoodCyclesToPromote = 2; // real target: 4
-  static const int kStrategicCyclesToPromote = 2; // real target: 4
+  static const int kCleanWeeksToPromote = 2;
+  static const int kSuccessfulRunsToPromote = 4;
+  static const int kCollectorWeeksToPromote = 3;
+  static const int kMonthsAsLeaderToPromote = 4;
+  static const int kStrategicGoodCyclesToPromote = 4;
+  static const int kStrategicCyclesToPromote = 4;
 
   // ── shared state ──
   int day = 1;
@@ -130,6 +130,7 @@ class CareerController extends ChangeNotifier {
   // ── Level 1: Plaza Lookout ──
   static const int sightingsPerDay = 3;
   static const int responseWindowSeconds = 15;
+  static const int sightingGapSeconds = 5; // quiet road between sightings
   int strikes = 0;
   Sighting? sighting;
   bool sightingHandled = false;
@@ -140,6 +141,7 @@ class CareerController extends ChangeNotifier {
   int secondsRemaining = responseWindowSeconds;
   int sightingSeq = 0; // bumped on every roll, even if the pool repeats an entry
   Timer? _sightingTimer;
+  Timer? _sightingGapTimer;
 
   // ── Level 2: Transporter ──
   int? runStage;
@@ -148,12 +150,16 @@ class CareerController extends ChangeNotifier {
   int transportStrikes = 0;
 
   // ── Level 3: Collector ──
+  static const int collectorGapSeconds = 4; // travel time between stops
   final Map<String, int> collected = {};
   final Map<String, String> targetState = {}; // pending | resisting | refused | paid | lost
   final Map<String, String> targetExcuse = {};
   int collectorWeeks = 0;
+  bool collectorBusy = false; // traveling between stops — no action can be taken
+  Timer? _collectorGapTimer;
 
   // ── Level 4: Cell Leader ──
+  static const int level4GapSeconds = 5; // settling time after closing a month or a crisis
   int stashKg = 100;
   final Map<String, int> allocated = {};
   List<String> crewNames = [];
@@ -163,6 +169,8 @@ class CareerController extends ChangeNotifier {
   int shortMonths = 0;
   String? pendingIncursion;
   String? pendingTrouble; // crew member name with trouble
+  bool level4Busy = false;
+  Timer? _level4GapTimer;
 
   // ── Level 5: cell-leader management loop ──
   List<CellLeaderRecord> cellLeaders = [];
@@ -182,6 +190,10 @@ class CareerController extends ChangeNotifier {
   String? strategicEventKind; // levels 6-7 only: 'investigation' | 'raid_territory' | 'paranoia' | 'diplomacy' | 'bribe'
   int investigationStage = 0; // 0 = none, 1 = surveillance, 2 = grand jury, 3 = raid imminent
   String? raidTargetName; // territory under active raid
+  bool strategicBusy = false;
+  Timer? _strategicGapTimer;
+  // The higher up the pyramid, the longer a cycle takes to settle.
+  int get strategicGapSeconds => level == 5 ? 5 : (level == 6 ? 6 : 7);
 
   // ── Levels 6-7: inner circle ──
   List<String> innerCircleIds = [];
@@ -330,6 +342,10 @@ class CareerController extends ChangeNotifier {
 
   void _initLevel1() {
     _sightingTimer?.cancel();
+    _sightingGapTimer?.cancel();
+    _collectorGapTimer?.cancel();
+    _level4GapTimer?.cancel();
+    _strategicGapTimer?.cancel();
     level = 1;
     strikes = 0;
     cleanWeeks = 0;
@@ -441,11 +457,17 @@ class CareerController extends ChangeNotifier {
       sightingsToday = 0;
       if (!_advanceDay()) return;
     }
-    sighting = _rollSighting();
-    sightingSeq += 1;
-    sightingHandled = false;
-    _startSightingTimer();
+    // The road sits quiet for a stretch before the next thing worth reporting rolls by.
+    sighting = null;
     notifyListeners();
+    _sightingGapTimer?.cancel();
+    _sightingGapTimer = Timer(const Duration(seconds: sightingGapSeconds), () {
+      sighting = _rollSighting();
+      sightingSeq += 1;
+      sightingHandled = false;
+      _startSightingTimer();
+      notifyListeners();
+    });
   }
 
   void _strike(String reason) {
@@ -484,6 +506,10 @@ class CareerController extends ChangeNotifier {
 
   void _initLevel2() {
     _sightingTimer?.cancel();
+    _sightingGapTimer?.cancel();
+    _collectorGapTimer?.cancel();
+    _level4GapTimer?.cancel();
+    _strategicGapTimer?.cancel();
     level = 2;
     runStage = null;
     runRisk = 0;
@@ -553,6 +579,10 @@ class CareerController extends ChangeNotifier {
 
   void _initLevel3() {
     _sightingTimer?.cancel();
+    _sightingGapTimer?.cancel();
+    _collectorGapTimer?.cancel();
+    _level4GapTimer?.cancel();
+    _strategicGapTimer?.cancel();
     level = 3;
     collected.clear();
     targetState.clear();
@@ -561,14 +591,26 @@ class CareerController extends ChangeNotifier {
       targetState[t.id] = 'pending';
     }
     collectorWeeks = 0;
+    collectorBusy = false;
     _announce('handler', 'Route\'s the same every week. Come back short and it\'s on you.');
   }
 
   int get expectedTotal => kCollectionRoute.fold(0, (a, t) => a + t.owed);
   int get collectedTotal => collected.values.fold(0, (a, v) => a + v);
 
+  // Travel time to/from a stop — locks every action on the route until it
+  // clears, so a week can't be cleared in a handful of instant taps.
+  void _startCollectorGap() {
+    collectorBusy = true;
+    _collectorGapTimer?.cancel();
+    _collectorGapTimer = Timer(const Duration(seconds: collectorGapSeconds), () {
+      collectorBusy = false;
+      notifyListeners();
+    });
+  }
+
   void visit(String targetId) {
-    if (level != 3) return;
+    if (level != 3 || collectorBusy) return;
     if (targetState[targetId] != 'pending') return;
     final target = kCollectionRoute.firstWhere((t) => t.id == targetId);
     if (_rng.nextDouble() < 0.55) {
@@ -580,11 +622,12 @@ class CareerController extends ChangeNotifier {
     }
     policeHeat = _clamp01to100(policeHeat + 1.5);
     cartelSuspicion = _clamp01to100(cartelSuspicion + 1);
+    _startCollectorGap();
     notifyListeners();
   }
 
   void threaten(String targetId) {
-    if (level != 3) return;
+    if (level != 3 || collectorBusy) return;
     if (targetState[targetId] != 'resisting') return;
     final target = kCollectionRoute.firstWhere((t) => t.id == targetId);
     if (_rng.nextDouble() < 0.45) {
@@ -595,11 +638,12 @@ class CareerController extends ChangeNotifier {
       recentStoryEvent = 'refused';
     }
     cartelSuspicion = _clamp01to100(cartelSuspicion + 2);
+    _startCollectorGap();
     notifyListeners();
   }
 
   void vandalize(String targetId, {required bool now}) {
-    if (level != 3) return;
+    if (level != 3 || collectorBusy) return;
     final state = targetState[targetId];
     if (state != 'resisting' && state != 'refused') return;
     final target = kCollectionRoute.firstWhere((t) => t.id == targetId);
@@ -624,11 +668,12 @@ class CareerController extends ChangeNotifier {
       _lastCrewLine = line;
     }
     unread = true;
+    _startCollectorGap();
     notifyListeners();
   }
 
   void reportToBoss() {
-    if (level != 3) return;
+    if (level != 3 || collectorBusy) return;
     if (targetState.values.any((s) => s == 'pending' || s == 'resisting')) return;
     if (collectedTotal < expectedTotal) {
       _die('You came up \$${expectedTotal - collectedTotal} short. They don\'t forgive that.');
@@ -653,6 +698,10 @@ class CareerController extends ChangeNotifier {
 
   void _initLevel4() {
     _sightingTimer?.cancel();
+    _sightingGapTimer?.cancel();
+    _collectorGapTimer?.cancel();
+    _level4GapTimer?.cancel();
+    _strategicGapTimer?.cancel();
     level = 4;
     stashKg = 100;
     allocated.clear();
@@ -665,9 +714,21 @@ class CareerController extends ChangeNotifier {
     shortMonths = 0;
     pendingIncursion = null;
     pendingTrouble = null;
+    level4Busy = false;
   }
 
   int get allocatedKg => allocated.values.fold(0, (a, v) => a + v);
+
+  // Word doesn't travel instantly — closing a month or settling a crisis
+  // locks the next action for a stretch instead of chaining straight through.
+  void _startLevel4Gap() {
+    level4Busy = true;
+    _level4GapTimer?.cancel();
+    _level4GapTimer = Timer(const Duration(seconds: level4GapSeconds), () {
+      level4Busy = false;
+      notifyListeners();
+    });
+  }
 
   void allocate(String distributorId, int kg) {
     if (level != 4) return;
@@ -683,7 +744,7 @@ class CareerController extends ChangeNotifier {
   }
 
   void closeMonth() {
-    if (level != 4) return;
+    if (level != 4 || level4Busy) return;
     if (pendingIncursion != null || pendingTrouble != null) return;
     double revenue = 0;
     for (final entry in allocated.entries) {
@@ -731,7 +792,14 @@ class CareerController extends ChangeNotifier {
     if (pendingTrouble == null && pendingIncursion == null && monthsAsLeader >= kMonthsAsLeaderToPromote) {
       promotionAvailable = true;
     }
+    _maybeStartLevel4Gap();
     notifyListeners();
+  }
+
+  // The gap only starts once nothing is left to resolve — a freshly rolled
+  // crisis must stay answerable right away, never locked behind a cooldown.
+  void _maybeStartLevel4Gap() {
+    if (pendingIncursion == null && pendingTrouble == null) _startLevel4Gap();
   }
 
   void respondIncursion(String choice) {
@@ -746,6 +814,7 @@ class CareerController extends ChangeNotifier {
     }
     pendingIncursion = null;
     if (pendingTrouble == null && monthsAsLeader >= kMonthsAsLeaderToPromote) promotionAvailable = true;
+    _maybeStartLevel4Gap();
     notifyListeners();
   }
 
@@ -765,6 +834,7 @@ class CareerController extends ChangeNotifier {
     }
     pendingTrouble = null;
     if (pendingIncursion == null && monthsAsLeader >= kMonthsAsLeaderToPromote) promotionAvailable = true;
+    _maybeStartLevel4Gap();
     notifyListeners();
   }
 
@@ -774,12 +844,17 @@ class CareerController extends ChangeNotifier {
 
   void _initStrategic(int lvl) {
     _sightingTimer?.cancel();
+    _sightingGapTimer?.cancel();
+    _collectorGapTimer?.cancel();
+    _level4GapTimer?.cancel();
+    _strategicGapTimer?.cancel();
     level = lvl;
     strategicCycles = 0;
     strategicEvent = null;
     strategicEventKind = null;
     investigationStage = 0;
     raidTargetName = null;
+    strategicBusy = false;
     if (lvl == 5) {
       cellLeaders = List.generate(5, (i) => CellLeaderRecord('Cell ${i + 1}', 0.6 + _rng.nextDouble() * 0.3, 0.7));
       checkedInThisCycle.clear();
@@ -815,6 +890,25 @@ class CareerController extends ChangeNotifier {
     }
   }
 
+  // Settling a cycle at this level takes real time — longer the higher up
+  // the pyramid you are, per [strategicGapSeconds].
+  void _startStrategicGap() {
+    strategicBusy = true;
+    _strategicGapTimer?.cancel();
+    _strategicGapTimer = Timer(Duration(seconds: strategicGapSeconds), () {
+      strategicBusy = false;
+      notifyListeners();
+    });
+  }
+
+  // Only start the cooldown once every level-5 cell crisis this cycle is
+  // resolved — a freshly rolled crisis must stay answerable right away.
+  void _maybeStartStrategicGap() {
+    if (pendingCellSkim == null && pendingCellPoach == null && pendingCellShortage == null) {
+      _startStrategicGap();
+    }
+  }
+
   void seizeTerritory(Territory t) {
     if (t.controlled || cash < 3000000) return;
     t.controlled = true;
@@ -836,7 +930,7 @@ class CareerController extends ChangeNotifier {
   }
 
   void advanceStrategicCycle() {
-    if (level < 5) return;
+    if (level < 5 || strategicBusy) return;
     if (level == 5 && (pendingCellSkim != null || pendingCellPoach != null || pendingCellShortage != null)) return;
     if (level >= 6 && strategicEvent != null) return;
     final revenue = strategicMonthlyRevenue;
@@ -850,6 +944,7 @@ class CareerController extends ChangeNotifier {
     if (level == 5) {
       _advanceCellLeaders();
       if (gameOver) return;
+      _maybeStartStrategicGap();
       notifyListeners();
       return;
     }
@@ -864,6 +959,8 @@ class CareerController extends ChangeNotifier {
     }
 
     if (investigationStage > 0) {
+      // A newly surfaced event must stay answerable right away — the gap
+      // starts once resolveStrategicEvent clears it, not here.
       strategicEvent = _investigationText(investigationStage);
       strategicEventKind = 'investigation';
       notifyListeners();
@@ -887,6 +984,9 @@ class CareerController extends ChangeNotifier {
     } else if (strategicCycles >= kStrategicCyclesToPromote) {
       promotionAvailable = level < 7;
     }
+    // Only a clean cycle (no fresh event) leaves you free to advance again
+    // right away, so only a clean cycle starts the cooldown here.
+    if (strategicEvent == null) _startStrategicGap();
     notifyListeners();
   }
 
@@ -944,6 +1044,7 @@ class CareerController extends ChangeNotifier {
     raidTargetName = null;
     paranoiaTargetId = null;
     if (strategicCycles >= kStrategicCyclesToPromote) promotionAvailable = level < 7;
+    _startStrategicGap();
     notifyListeners();
   }
 
@@ -1128,11 +1229,11 @@ class CareerController extends ChangeNotifier {
   }
 
   void _afterCellEventResolved() {
-    if (pendingCellSkim == null &&
-        pendingCellPoach == null &&
-        pendingCellShortage == null &&
-        strategicGoodCycles >= kStrategicGoodCyclesToPromote) {
-      promotionAvailable = true;
+    if (pendingCellSkim == null && pendingCellPoach == null && pendingCellShortage == null) {
+      if (strategicGoodCycles >= kStrategicGoodCyclesToPromote) promotionAvailable = true;
+      // The gap only starts once every crisis this cycle is resolved — a
+      // freshly rolled one must stay answerable right away.
+      _startStrategicGap();
     }
   }
 
@@ -1147,364 +1248,10 @@ class CareerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Generates story-contextual chips for the personal chat tray based on
-  /// current game state. These are injected at the front of the tray so they
-  /// always surface, regardless of the static catalog's scoring. Each chip is
-  /// a fully valid [PersonalReplyAction] — it routes through the same dialogue
-  /// engine as any static chip when the player taps it.
-  ///
-  /// Ordering: most urgent / specific events first (a bribe that just happened
-  /// beats a generic "bored" chip), falling back to time-of-day and mood chips,
-  /// with deflection chips ("just missed you") always at the end as a way out.
-  List<PersonalReplyAction> _storyContextChips(String contactId) {
-    final chips = <PersonalReplyAction>[];
-    final rel = relationships[contactId]!;
-    final thread = personalThreads[contactId]!;
-
-    // ── 1. Event-reactive (most specific/urgent) ───────────────────────────
-    switch (recentStoryEvent) {
-      case 'bribed':
-        chips.add(const PersonalReplyAction('Paid someone off', "I had to pay someone off today. Felt weird about it.", tone: ReplyTone.honest, topics: {Topic.money}, intent: Intent.confession, intensity: 0.6));
-        chips.add(const PersonalReplyAction('Had to grease someone', "Slipped someone some cash today to make a problem go away.", tone: ReplyTone.vague, topics: {Topic.money}, intent: Intent.statement, intensity: 0.5));
-        break;
-      case 'close_call':
-        chips.add(const PersonalReplyAction('Close call', "Had a close call today. I'm okay though.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.6));
-        chips.add(const PersonalReplyAction('Shook up', "Something happened today that had me scared for a second. I'm fine.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.6));
-        chips.add(const PersonalReplyAction('Too close', "Almost messed up bad today. Keeping it together though.", tone: ReplyTone.vague, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.5));
-        break;
-      case 'run_success':
-        chips.add(const PersonalReplyAction('Something went right', "Something I had to do today actually worked out.", tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.4));
-        chips.add(const PersonalReplyAction('Getting it done', "Pulled off something today I wasn't sure I could.", tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.4));
-        chips.add(const PersonalReplyAction('Getting the hang of it', "Starting to get the hang of things. Feels good.", tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.3));
-        break;
-      case 'crossed_line':
-        chips.add(const PersonalReplyAction('Crossed a line', "I did something today I can't really undo.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.7));
-        chips.add(const PersonalReplyAction('Not proud of it', "Had to handle something the hard way. Not proud of it.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.6));
-        chips.add(const PersonalReplyAction('Had to do it', "I told myself I'd never do something like that. Then I did.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.7));
-        break;
-      case 'crew_violence':
-        chips.add(const PersonalReplyAction('Had to get rough', "Had to handle something the hard way today.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.6));
-        chips.add(const PersonalReplyAction('Ugly situation', "Things got ugly today. I handled it. But still.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.6));
-        chips.add(const PersonalReplyAction('People push you', "Some people push you until you have no choice.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-        break;
-      case 'refused':
-        chips.add(const PersonalReplyAction('Someone pushed back', "Someone gave me a hard time today. Had to deal with it.", tone: ReplyTone.honest, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-        chips.add(const PersonalReplyAction('People are difficult', "Not everyone plays ball. Learning that the hard way.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.4));
-        break;
-      case 'crew_trouble':
-        chips.add(const PersonalReplyAction('Team drama', "Someone on my team is causing problems. Dealing with it.", tone: ReplyTone.vague, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.5));
-        chips.add(const PersonalReplyAction('Managing people', "Managing people is harder than I thought.", tone: ReplyTone.honest, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.4));
-        chips.add(const PersonalReplyAction('Trust issues', "One person can mess up the whole thing. Hate that.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-        break;
-      case 'incursion':
-        chips.add(const PersonalReplyAction('Things are tense', "Things have been tense in my area lately.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-        chips.add(const PersonalReplyAction('People testing me', "Someone's testing me right now. Seeing how I respond.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-        break;
-    }
-
-    // ── 2. Time-of-day aware ───────────────────────────────────────────────
-    switch (timeOfDay) {
-      case TimeOfDay.night:
-        chips.add(const PersonalReplyAction("Can't sleep", "Can't really sleep. Brain won't shut off.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.3));
-        chips.add(const PersonalReplyAction('Night thoughts', "Everything feels heavier at night for some reason.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.3));
-        chips.add(const PersonalReplyAction('Wide awake', "It's late and I should be asleep but my head won't slow down.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.3));
-        break;
-      case TimeOfDay.morning:
-        if (level >= 2) {
-          chips.add(const PersonalReplyAction('Big day ahead', "Got a lot going on today. Wish me luck.", tone: ReplyTone.warm, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.4));
-          chips.add(const PersonalReplyAction('Up early', "Up early. Can't stop thinking about what's ahead.", tone: ReplyTone.honest, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.3));
-        }
-        break;
-      case TimeOfDay.evening:
-        chips.add(const PersonalReplyAction('Long day', "Today was a lot. Don't even know where to start.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.4));
-        chips.add(const PersonalReplyAction('Finally breathing', "Finally getting to breathe a little. It's been a day.", tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.3));
-        chips.add(const PersonalReplyAction('Day done', "Glad today is almost over honestly.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.3));
-        break;
-      case TimeOfDay.afternoon:
-        break;
-    }
-
-    // ── 3. Cash state ─────────────────────────────────────────────────────
-    if (cash < 300 && level >= 2) {
-      chips.add(const PersonalReplyAction('Broke', "Money's been really tight lately.", tone: ReplyTone.honest, topics: {Topic.money}, intent: Intent.statement, intensity: 0.5, subject: 'being broke'));
-      chips.add(const PersonalReplyAction('Struggling financially', "Things have been rough financially. Not gonna lie.", tone: ReplyTone.honest, topics: {Topic.money}, intent: Intent.statement, intensity: 0.5));
-      chips.add(const PersonalReplyAction('Debt stress', "I owe people. It's sitting heavy on me.", tone: ReplyTone.honest, topics: {Topic.money}, intent: Intent.statement, intensity: 0.5, subject: 'debt'));
-    } else if (cash > 50000) {
-      chips.add(const PersonalReplyAction('Doing well', "Things have been going well for me lately. Money-wise.", tone: ReplyTone.warm, topics: {Topic.money}, intent: Intent.statement, intensity: 0.4, resolvesThread: true));
-      chips.add(const PersonalReplyAction('Good stretch', "Had a good stretch recently. Can't complain.", tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.3));
-    } else if (cash > 8000 && level <= 3) {
-      chips.add(const PersonalReplyAction('Good week', "Actually had a decent week financially.", tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.4));
-    }
-
-    // ── 4. Heat / being watched ────────────────────────────────────────────
-    if (policeHeat > 75) {
-      chips.add(const PersonalReplyAction('Need to be careful', "I need to be more careful. Things are getting risky.", tone: ReplyTone.honest, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.7));
-      chips.add(const PersonalReplyAction('Heat is on', "There's a lot of attention on me right now. Gotta stay low.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.6));
-    } else if (policeHeat > 50) {
-      chips.add(const PersonalReplyAction('Watched', "I feel like people have been watching me lately.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-      chips.add(const PersonalReplyAction('Something feels off', "Something feels off. Like someone's paying attention.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-      chips.add(const PersonalReplyAction('Eyes on me', "I've just been feeling... observed. Can't explain it.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.4));
-    }
-
-    // ── 5. Relationship-reactive ───────────────────────────────────────────
-    if (rel.suspicion > 50) {
-      chips.add(const PersonalReplyAction("You don't have to worry", "I feel like you've been worried about me. You don't have to be.", tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.4));
-      chips.add(const PersonalReplyAction('I know you worry', "I know you worry. I'm being careful. I promise.", tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.promise, intensity: 0.4));
-    }
-    if (rel.mood < -20) {
-      chips.add(const PersonalReplyAction('Know I messed up', "I know I've been letting you down lately.", tone: ReplyTone.honest, topics: {Topic.affection}, intent: Intent.confession, intensity: 0.5));
-      chips.add(const PersonalReplyAction('Been distant', "I've been distant. I know. I'm sorry.", tone: ReplyTone.warm, topics: {Topic.affection}, intent: Intent.confession, intensity: 0.4));
-      chips.add(const PersonalReplyAction('Trying to do better', "I want to do better by you. I mean that.", tone: ReplyTone.warm, topics: {Topic.affection}, intent: Intent.promise, intensity: 0.4));
-    }
-    if (rel.daysSinceReply > 2 && thread.isNotEmpty) {
-      chips.add(const PersonalReplyAction('Been MIA', "I know I've been MIA. Things have been a lot.", tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.4));
-      chips.add(const PersonalReplyAction('Sorry been quiet', "Sorry I've been quiet. It's been one of those stretches.", tone: ReplyTone.warm, topics: {Topic.affection}, intent: Intent.statement, intensity: 0.4));
-      chips.add(const PersonalReplyAction('Checked out for a bit', "I kind of checked out for a while. I'm back though.", tone: ReplyTone.warm, topics: {Topic.affection}, intent: Intent.statement, intensity: 0.3));
-    }
-
-    // ── 6. Level-specific story context ───────────────────────────────────
-    switch (level) {
-      case 1:
-        if (strikes > 0) {
-          chips.add(const PersonalReplyAction('Messed up at work', "I messed up at work today. Wasn't fatal but it was close.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.5));
-          chips.add(const PersonalReplyAction('Slipped up', "Made a mistake at work. Won't happen again.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.4));
-        }
-        if (cleanWeeks >= 1) {
-          chips.add(const PersonalReplyAction('Work going okay', "Things at work have been going okay lately.", tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.3));
-        }
-        chips.add(const PersonalReplyAction('New job', "Started something new. Still figuring it out.", tone: ReplyTone.honest, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.3));
-        break;
-      case 2:
-        if (runStage != null) {
-          chips.add(const PersonalReplyAction('In the middle of something', "Can't really talk right now. In the middle of something.", tone: ReplyTone.vague, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.5));
-          chips.add(const PersonalReplyAction('Kind of tense right now', "Things are a little tense right now. I'll explain later.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-        }
-        chips.add(const PersonalReplyAction('Long drives', "Been doing a lot of driving lately. Long ones.", tone: ReplyTone.vague, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.3));
-        chips.add(const PersonalReplyAction('Checkpoints', "Lot of people asking me questions lately. At work.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.4));
-        break;
-      case 3:
-        if (targetState.values.any((s) => s == 'refused' || s == 'lost')) {
-          chips.add(const PersonalReplyAction('Difficult people', "Some people just make things harder than they need to be.", tone: ReplyTone.honest, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-          chips.add(const PersonalReplyAction('Not everyone cooperates', "Not everyone's cooperative. Having to push sometimes.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.4));
-        }
-        chips.add(const PersonalReplyAction('Different stress', "Work's been... a different kind of stress lately.", tone: ReplyTone.vague, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.4));
-        chips.add(const PersonalReplyAction('Going door to door', "Been doing a lot of face-to-face stuff for work. Tiring.", tone: ReplyTone.vague, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.3));
-        break;
-      case 4:
-        if (pendingTrouble != null) {
-          chips.add(const PersonalReplyAction('Someone causing problems', "Someone I work with is giving me problems. Have to deal with it.", tone: ReplyTone.vague, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.5));
-        }
-        if (pendingIncursion != null) {
-          chips.add(const PersonalReplyAction('Competition', "Someone's trying to move into my space at work. Handling it.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-        }
-        if (lastMonthTake > 80000) {
-          chips.add(const PersonalReplyAction('Best month yet', "Had my best month financially. By a lot.", tone: ReplyTone.warm, topics: {Topic.money}, intent: Intent.statement, intensity: 0.4));
-        }
-        chips.add(const PersonalReplyAction('Managing people', "Managing people is harder than I thought it'd be.", tone: ReplyTone.honest, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.4));
-        chips.add(const PersonalReplyAction('In charge now', "A lot of people are depending on me right now. It's a lot.", tone: ReplyTone.honest, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.4));
-        break;
-      case 5:
-      case 6:
-      case 7:
-        if (investigationStage > 0) {
-          chips.add(const PersonalReplyAction('Under a microscope', "I feel like I'm under a microscope lately.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.7));
-          chips.add(const PersonalReplyAction('Heat is serious', "There are serious people paying close attention to me right now.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.7));
-          chips.add(const PersonalReplyAction('Got to lay low', "Can't be as visible as I was. Got to pull back for a bit.", tone: ReplyTone.vague, topics: {Topic.plans}, intent: Intent.statement, intensity: 0.6));
-        }
-        chips.add(const PersonalReplyAction('In deep', "Sometimes I feel like I'm in over my head.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.6));
-        chips.add(const PersonalReplyAction('Hard to separate', "It's getting harder to keep different parts of my life separate.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.6));
-        chips.add(const PersonalReplyAction('People around me', "The people around me lately... it's a different world.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-        break;
-    }
-
-    // ── 7. Guilt / moral reflection (level-gated) ─────────────────────────
-    if (level >= 3) {
-      chips.add(const PersonalReplyAction('Been doing things', "I've been doing things lately I can't really talk about.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.5));
-    }
-    if (level >= 4) {
-      chips.add(const PersonalReplyAction('Reflecting', "I've been thinking about the choices I've been making lately.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.5));
-      chips.add(const PersonalReplyAction('Who am I becoming', "Sometimes I wonder if I'm turning into someone I wouldn't recognize.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.6));
-      chips.add(PersonalReplyAction("The people I'm around", "I've been spending time around some new people. Different crowd.", tone: ReplyTone.vague, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.4));    }
-    if (level >= 5) {
-      chips.add(const PersonalReplyAction('Worth it?', "I don't know if what I'm doing is worth it anymore.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.7));
-      chips.add(const PersonalReplyAction('Point of no return', "I've passed a point where I can't really go back to who I was.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.7));
-      chips.add(const PersonalReplyAction('Carrying a lot', "There's a lot I carry around that nobody knows about.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.confession, intensity: 0.6));
-    }
-
-    // ── 8. Deflection — always available, always last ──────────────────────
-    chips.addAll([
-      const PersonalReplyAction('Just missed you', "Nothing crazy. Just wanted to hear your voice.", tone: ReplyTone.warm, topics: {Topic.affection}, intent: Intent.statement, intensity: 0.2),
-      const PersonalReplyAction('No reason', "No reason. Just missed you.", tone: ReplyTone.warm, topics: {Topic.affection}, intent: Intent.statement, intensity: 0.2),
-      const PersonalReplyAction('Bored', "Bored honestly. What are you up to?", tone: ReplyTone.warm, topics: {Topic.greeting}, intent: Intent.question, intensity: 0.2),
-      const PersonalReplyAction('Had you on my mind', "Just had you on my mind.", tone: ReplyTone.warm, topics: {Topic.affection}, intent: Intent.statement, intensity: 0.2),
-      const PersonalReplyAction('Slow day', "Nothing interesting going on today honestly.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.2),
-      const PersonalReplyAction('In my head', "I've been quiet lately. Just been in my head.", tone: ReplyTone.vague, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.3),
-      const PersonalReplyAction('Just checking in', "Just wanted to check in. See how you're doing.", tone: ReplyTone.warm, topics: {Topic.greeting}, intent: Intent.question, intensity: 0.2),
-      const PersonalReplyAction('Today was a lot', "Today was a lot. Don't even know where to start.", tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.3),
-    ]);
-
-    return chips;
-  }
-
-  /// How many options [personalReplyOptions] surfaces at once — half the
-  /// full catalog, rounded up. A proportion rather than a fixed number, so
-  /// it stays "half the menu" if the catalog's size ever changes.
-  static int get _personalReplyOptionCount => (kPersonalReplyActions.length / 2).ceil();
-
-  /// The subset of [kPersonalReplyActions] offered for [contactId] right
-  /// now — narrowed to [_personalReplyOptionCount] options by contact fit
-  /// (some options, like flirting, only make sense for certain relations)
-  /// and by the live conversation's context: what the thread's on, whether
-  /// a question is hanging, how tense/broke/distant things are, and the
-  /// time of day. Recomputed from current state on every call (no
-  /// randomness), so the same state always offers the same options, and the
-  /// menu shifts only when the conversation itself does. Returned in the
-  /// catalog's own order, not score order, so the menu reads consistently.
-  List<ReplyOption> personalReplyOptions(String contactId) {
-    final rel = relationships[contactId]!;
-    final threadEmpty = personalThreads[contactId]!.isEmpty;
-    final tod = timeOfDay;
-    final lv = level;
-
-    // Inject story-contextual chips at the front (up to 3), for every
-    // contact — these are generated in priority order so the most
-    // urgent/specific chips come first. We don't dedupe against the rest of
-    // the tray — a context chip and a general one can have similar intent,
-    // but the context one is always more specific and earns its slot
-    // independently.
-    final contextChips = _storyContextChips(contactId).take(3).map(StoryChipOption.new).toList();
-
-    // Mama and Vale get the intent-chip catalog — see conversation/intents.dart
-    // (Mama's kIntentChips) and conversation/vale_intents.dart (Vale's
-    // kValeIntentChips). Every other contact keeps the exact original
-    // kPersonalReplyActions catalog and scoring below, untouched.
-    if (contactId == 'mama' || contactId == 'partner') {
-      final chips = contactId == 'mama' ? kIntentChips : kValeIntentChips;
-
-      // Contact-specific legacy actions ('Change the subject', 'Come clean (a
-      // little)', 'Deny everything', 'Brush it off', etc. — see the
-      // allowedContacts entries in kPersonalReplyActions) predate the
-      // intent-chip system and were never migrated into it. They cover
-      // exactly the deflection/answer register the generic intent-chip
-      // catalog doesn't have (nothing in kIntentChips/kValeIntentChips lets
-      // the player lie about or partially explain a suspicion-raising topic)
-      // — without them, a pointed follow-up like "what are the actual
-      // plans?" had no chip that actually addressed it. Scored/gated
-      // identically to every other contact's kPersonalReplyActions tray
-      // below, just restricted to entries tagged for this contact. (Vale has
-      // none of these yet, so this is simply empty for her today.)
-      final eligibleLegacy = [
-        for (var i = 0; i < kPersonalReplyActions.length; i++)
-          if (kPersonalReplyActions[i].allowedContacts?.contains(contactId) ?? false)
-            if (kPersonalReplyActions[i].showWhenMoodBelow == null || rel.mood < kPersonalReplyActions[i].showWhenMoodBelow!)
-              if (kPersonalReplyActions[i].showWhenMoodAbove == null || rel.mood > kPersonalReplyActions[i].showWhenMoodAbove!)
-                if (!kPersonalReplyActions[i].requiresThread || !threadEmpty)
-                  if (kPersonalReplyActions[i].showWhenLevelMin == null || lv >= kPersonalReplyActions[i].showWhenLevelMin!)
-                    if (kPersonalReplyActions[i].showWhenLevelMax == null || lv <= kPersonalReplyActions[i].showWhenLevelMax!)
-                      if (kPersonalReplyActions[i].showWhenTrustBelow == null || rel.trust < kPersonalReplyActions[i].showWhenTrustBelow!)
-                        if (kPersonalReplyActions[i].showWhenTrustAbove == null || rel.trust > kPersonalReplyActions[i].showWhenTrustAbove!)
-                          if (kPersonalReplyActions[i].showWhenSuspicionAbove == null || rel.suspicion > kPersonalReplyActions[i].showWhenSuspicionAbove!)
-                            if (kPersonalReplyActions[i].showWhenClosenessAbove == null || rel.closeness > kPersonalReplyActions[i].showWhenClosenessAbove!)
-                              (index: i, action: kPersonalReplyActions[i]),
-      ];
-      final scoredLegacy = [
-        for (final e in eligibleLegacy) (index: e.index, action: e.action, score: _personalReplyOptionScore(e.action, rel: rel, threadEmpty: threadEmpty, tod: tod, level: lv)),
-      ]..sort((a, b) {
-          final byScore = b.score.compareTo(a.score);
-          return byScore != 0 ? byScore : a.index.compareTo(b.index);
-        });
-      final pickedLegacy = scoredLegacy.take(_mamaLegacyActionCount).toList()..sort((a, b) => a.index.compareTo(b.index));
-      final legacyChips = pickedLegacy.map((p) => StoryChipOption(p.action));
-
-      final eligible = [
-        for (var i = 0; i < chips.length; i++)
-          if (chips[i].showWhenMoodBelow == null || rel.mood < chips[i].showWhenMoodBelow!)
-            if (chips[i].showWhenMoodAbove == null || rel.mood > chips[i].showWhenMoodAbove!)
-              if (!chips[i].requiresThread || !threadEmpty)
-                if (chips[i].showWhenLevelMin == null || lv >= chips[i].showWhenLevelMin!)
-                  if (chips[i].showWhenLevelMax == null || lv <= chips[i].showWhenLevelMax!)
-                    if (chips[i].showWhenTrustBelow == null || rel.trust < chips[i].showWhenTrustBelow!)
-                      if (chips[i].showWhenTrustAbove == null || rel.trust > chips[i].showWhenTrustAbove!)
-                        if (chips[i].showWhenSuspicionAbove == null || rel.suspicion > chips[i].showWhenSuspicionAbove!)
-                          if (chips[i].showWhenClosenessAbove == null || rel.closeness > chips[i].showWhenClosenessAbove!)
-                            (index: i, chip: chips[i]),
-      ];
-      final scored = [
-        for (final e in eligible) (index: e.index, chip: e.chip, score: _intentChipScore(e.chip, rel: rel, threadEmpty: threadEmpty, tod: tod, level: lv)),
-      ]..sort((a, b) {
-          final byScore = b.score.compareTo(a.score);
-          return byScore != 0 ? byScore : a.index.compareTo(b.index);
-        });
-      // _intentChipScore starts every chip at a baseline of 1.0 and only adds
-      // from there — a chip still sitting at exactly 1.0 got no contextual
-      // signal at all (nothing about mood/topic/time-of-day/level favors it
-      // right now), so it isn't relevant to this turn, just generically
-      // available. Filtering those out means the tray only ever contains
-      // chips something about the current state actually justifies, instead
-      // of always padding up to _intentChipCount with whatever was left.
-      // The single top-scored chip is kept even at baseline as a floor, so
-      // the tray is never completely empty when truly nothing stands out.
-      final relevant = scored.where((e) => e.score > 1.0).toList();
-      final picked = (relevant.isNotEmpty ? relevant : scored.take(1).toList()).take(_intentChipCount);
-      // Kept in score order (highest first), not re-sorted back to catalog
-      // order — whichever chip is actually the best fit for what just
-      // happened leads, whether that's Explain More after a real topic gets
-      // raised or something else entirely after a plain Greet. `scored` is
-      // already sorted this way (see above), so this just carries that
-      // order through instead of discarding it.
-      final pickedChips = picked.map((p) => p.chip).toList();
-      // Mama-only for now: resolveMoneyAsk's reaction pool (kMamaMoneyAskReactions)
-      // is written in her voice specifically, so surfacing this for Vale
-      // would send her replies in the wrong character's voice. Surfaced
-      // whenever the live thread is actually on money and the weekly cap
-      // isn't spent — see resolveMoneyAsk. Placed right after the context
-      // chips so it's easy to spot the turn it's actually relevant, rather
-      // than buried among the always-present intent chips.
-      final moneyAskChip = (contactId == 'mama' && rel.currentTopic == Topic.money && moneyAsksRemaining(contactId) > 0)
-          ? const [MoneyAskChipOption()]
-          : const <ReplyOption>[];
-      return [...contextChips, ...moneyAskChip, ...legacyChips, ...pickedChips];
-    }
-
-    final eligible = [
-      for (var i = 0; i < kPersonalReplyActions.length; i++)
-        if (kPersonalReplyActions[i].allowedContacts == null || kPersonalReplyActions[i].allowedContacts!.contains(contactId))
-          // Visibility gates: mood, thread-presence, level, trust, suspicion, closeness.
-          if (kPersonalReplyActions[i].showWhenMoodBelow == null || rel.mood < kPersonalReplyActions[i].showWhenMoodBelow!)
-            if (kPersonalReplyActions[i].showWhenMoodAbove == null || rel.mood > kPersonalReplyActions[i].showWhenMoodAbove!)
-              if (!kPersonalReplyActions[i].requiresThread || !threadEmpty)
-                if (kPersonalReplyActions[i].showWhenLevelMin == null || lv >= kPersonalReplyActions[i].showWhenLevelMin!)
-                  if (kPersonalReplyActions[i].showWhenLevelMax == null || lv <= kPersonalReplyActions[i].showWhenLevelMax!)
-                    if (kPersonalReplyActions[i].showWhenTrustBelow == null || rel.trust < kPersonalReplyActions[i].showWhenTrustBelow!)
-                      if (kPersonalReplyActions[i].showWhenTrustAbove == null || rel.trust > kPersonalReplyActions[i].showWhenTrustAbove!)
-                        if (kPersonalReplyActions[i].showWhenSuspicionAbove == null || rel.suspicion > kPersonalReplyActions[i].showWhenSuspicionAbove!)
-                          if (kPersonalReplyActions[i].showWhenClosenessAbove == null || rel.closeness > kPersonalReplyActions[i].showWhenClosenessAbove!)
-                            (index: i, action: kPersonalReplyActions[i]),
-    ];
-    final scored = [
-      for (final e in eligible) (index: e.index, action: e.action, score: _personalReplyOptionScore(e.action, rel: rel, threadEmpty: threadEmpty, tod: tod, level: lv)),
-    ]..sort((a, b) {
-        final byScore = b.score.compareTo(a.score);
-        return byScore != 0 ? byScore : a.index.compareTo(b.index);
-      });
-    final picked = scored.take(_personalReplyOptionCount).toList()..sort((a, b) => a.index.compareTo(b.index));
-    final staticChips = picked.map((p) => StoryChipOption(p.action));
-
-    return [...contextChips, ...staticChips];
-  }
-
-  /// How many [IntentChip]s [personalReplyOptions] surfaces at once for
-  /// Mama, on top of up to 3 story chips — a fixed tray size rather than a
-  /// proportion of the 20-entry catalog (unlike [_personalReplyOptionCount]):
-  /// half of 20 is a tray nobody can scan at a glance.
-  static const int _intentChipCount = 5;
-
-  /// How many of Mama's orphaned legacy [kPersonalReplyActions] entries
-  /// (allowedContacts: {'mama'}) [personalReplyOptions] surfaces alongside
-  /// her intent chips — small on purpose, since these exist to plug specific
-  /// deflection/answer gaps the generic intent-chip catalog doesn't cover,
-  /// not to duplicate it wholesale.
-  static const int _mamaLegacyActionCount = 2;
+  // Reply-tray chip generation & scoring (_storyContextChips,
+  // personalReplyOptions, and their scoring helpers) has moved to the
+  // ReplyTray extension in conversation/reply_tray.dart — that's the single
+  // place that now decides what shows up in a personal thread's reply tray.
 
   /// How many times per week (reset at the [_advanceDay] week boundary) the
   /// player can use Mama's "(Ask for Money)" flow — see [resolveMoneyAsk].
@@ -1517,139 +1264,30 @@ class CareerController extends ChangeNotifier {
   int moneyAsksRemaining(String contactId) =>
       (kMaxMoneyAsksPerWeek - relationships[contactId]!.moneyAsksThisWeek).clamp(0, kMaxMoneyAsksPerWeek);
 
-  /// Mirrors [_personalReplyOptionScore], adapted to an [IntentChip]'s
-  /// (primaryTone, primaryTopics, primaryIntent) — the representative
-  /// register used for tray-ranking nudges only; the actual turn plays out
-  /// with whichever phrasing line pickLine() ends up choosing.
-  static double _intentChipScore(
-    IntentChip a, {
-    required RelationshipState rel,
-    required bool threadEmpty,
-    required TimeOfDay tod,
-    required int level,
-  }) {
-    var score = 1.0;
-
-    if (threadEmpty) {
-      if (a.primaryTopics.contains(Topic.greeting)) score += 5;
-      if (a.primaryIntent == Intent.dismissal) score -= 3;
-    }
-
-    if (rel.currentTopic != null && a.primaryTopics.contains(rel.currentTopic)) score += 4;
-    if (!rel.lastQuestionAnswered && a.primaryIntent == Intent.dismissal) score -= 3;
-
-    // Elaborate exists specifically to answer "say more" — it should win a
-    // slot whenever there's actually a thread to continue or a question
-    // hanging, so the player is never left with nothing that flows with
-    // what Mama just said. Outweighs the empty-thread greeting bonus above
-    // on purpose: a live topic or pending question only exists once the
-    // thread already has content, so the two conditions never fight.
-    // Topic.greeting is excluded on purpose — a plain "hey" isn't a subject
-    // worth "explaining more" about, so it shouldn't make elaborate look
-    // like the best reply just because some topic happens to be set.
-    if (a.intent == ConversationIntent.elaborate) {
-      if (rel.topicProgress >= 1 && rel.currentTopic != Topic.greeting) score += 8;
-      if (!rel.lastQuestionAnswered) score += 6;
-    }
-
-    if (rel.fear > 40 && a.primaryTone == ReplyTone.warm) score += 2;
-    if (rel.suspicion > 50 && (a.primaryTone == ReplyTone.warm || a.primaryTone == ReplyTone.honest)) score += 2;
-    if (rel.trust < 30 && a.primaryTone == ReplyTone.honest) score += 2;
-
-    if (rel.mood < -30 && (a.primaryTone == ReplyTone.warm || a.primaryIntent == Intent.promise)) score += 4;
-    if (rel.mood < -30 && (a.primaryTone == ReplyTone.cold || a.primaryIntent == Intent.dismissal)) score -= 4;
-    if (rel.mood < -10 && a.primaryIntent == Intent.dismissal) score -= 2;
-    if (rel.mood > 30 && a.primaryTopics.contains(Topic.affection)) score += 2;
-    if (rel.mood > 30 && (a.primaryTopics.contains(Topic.wellbeing) || a.primaryTopics.contains(Topic.goodNews))) score += 1;
-
-    switch (tod) {
-      case TimeOfDay.morning:
-        if (a.primaryTopics.contains(Topic.greeting) || a.primaryTopics.contains(Topic.wellbeing)) score += 2;
-        break;
-      case TimeOfDay.afternoon:
-        if (a.primaryTopics.contains(Topic.family) || a.primaryTopics.contains(Topic.suspicion)) score += 2;
-        break;
-      case TimeOfDay.evening:
-      case TimeOfDay.night:
-        if (a.primaryTopics.contains(Topic.affection) || a.primaryIntent == Intent.promise) score += 2;
-        break;
-    }
-
-    if (a.showWhenLevelMin != null && level >= a.showWhenLevelMin!) score += 2;
-    if (a.showWhenLevelMax != null && level <= a.showWhenLevelMax!) score += 1;
-    if (a.showWhenSuspicionAbove != null && rel.suspicion > (a.showWhenSuspicionAbove! + 15)) score += 2;
-    if (a.showWhenTrustAbove != null && rel.trust > (a.showWhenTrustAbove! + 10)) score += 1;
-    if (a.showWhenClosenessAbove != null && rel.closeness > (a.showWhenClosenessAbove! + 10)) score += 1;
-
-    return score;
-  }
-
   /// Sends [intent] to [contactId] (Mama, in practice — the only contact
-  /// [personalReplyOptions] offers [IntentChip]s for): picks the actual
-  /// player-side wording from the chip's [IntentChip.phrasings] via
-  /// pickLine() (so it varies turn to turn even though the chip's label
-  /// never does), then routes through the existing, unmodified
-  /// [personalReplyAction] — every stat delta, block check, topic-thread
-  /// update, and spam counter behaves exactly as it already did for a
-  /// scripted [PersonalReplyAction].
+  /// [personalReplyOptions] offers [IntentChip]s for): translates the chip
+  /// into a [PersonalReplyAction] template carrying its full [IntentChip.
+  /// phrasings] pool (rather than a single pre-picked line) and hands it to
+  /// [personalReplyAction], which now does the actual phrasing-resolution
+  /// generically for every action, chip-originated or not — see its own doc
+  /// comment. Every stat delta, block check, topic-thread update, and spam
+  /// counter still behaves exactly as it already did for a scripted
+  /// [PersonalReplyAction].
   void sendIntent(String contactId, ConversationIntent intent) {
-    final rel = relationships[contactId]!;
-    if (rel.goneQuiet || rel.resolved || rel.isBlocked) return;
     final chips = contactId == 'mama' ? kIntentChips : kValeIntentChips;
     final chip = chips.firstWhere((c) => c.intent == intent);
-    final ctx = DialogueContext(
-      mood: rel.mood,
-      closeness: rel.closeness,
-      trust: rel.trust,
-      suspicion: rel.suspicion,
-      daysSinceReply: rel.daysSinceReply,
-      recentTones: rel.recentTones,
-      memories: rel.memories,
-      timeOfDay: timeOfDay,
-      isWeekend: isWeekend,
-      currentTopic: rel.currentTopic,
-      topicProgress: rel.topicProgress,
-      playerTopicsToday: rel.topicsDiscussedToday,
-      levelPhase: levelPhase,
-      recentConversation: rel.recentConversation,
-      facts: rel.facts,
-      honesty: rel.honesty,
-      reliability: rel.reliability,
-      responsiveness: rel.responsiveness,
+    personalReplyAction(
+      contactId,
+      PersonalReplyAction(
+        chip.label,
+        phrasings: chip.phrasings,
+        tone: chip.primaryTone,
+        topics: chip.primaryTopics,
+        intent: chip.primaryIntent,
+        intensity: chip.intensity,
+        conversationIntent: intent,
+      ),
     );
-    final line = pickLine(
-          _rng,
-          chip.phrasings,
-          ctx,
-          currentDay: day,
-          lineLastUsedDay: rel.lineLastUsedDay,
-          recentLineHistory: rel.recentLineHistory,
-        ) ??
-        chip.phrasings.first;
-    recordLineUse(rel.lineLastUsedDay, rel.recentLineHistory, line, day);
-
-    final action = PersonalReplyAction(
-      chip.label,
-      line.text,
-      tone: line.tone ?? chip.primaryTone,
-      topics: line.topic != null ? {line.topic!, ...chip.primaryTopics} : chip.primaryTopics,
-      intent: line.intent ?? chip.primaryIntent,
-      intensity: chip.intensity,
-      conversationIntent: intent,
-      // Forwarded from whichever specific phrasing pickLine() chose — a
-      // pre-existing gap fixed alongside establishesFacts below: subject/
-      // resolvesThread already existed on DialogueLine (Phase 3) but were
-      // never carried over here, so no IntentChip phrasing's subject/
-      // resolvesThread has ever actually taken effect. No behavior change
-      // for existing content (nothing currently sets either on a phrasing),
-      // but silently dropping them here would leave establishesFacts with
-      // the exact same latent gap the moment anyone tries to use it below.
-      subject: line.subject,
-      resolvesThread: line.resolvesThread,
-      establishesFacts: line.establishesFacts,
-      fulfillsPromise: line.fulfillsPromise,
-    );
-    personalReplyAction(contactId, action);
   }
 
   /// Resolves the player's typed dollar amount from Mama's "(Ask for Money)"
@@ -1666,6 +1304,7 @@ class CareerController extends ChangeNotifier {
     final rel = relationships[contactId]!;
     if (rel.goneQuiet || rel.resolved || rel.isBlocked) return;
     if (amount <= 0 || moneyAsksRemaining(contactId) <= 0) return;
+    final p = kPersonalContact[contactId]!;
     rel.moneyAsksThisWeek += 1;
 
     personalThreads[contactId]!.add(Message('Can you send me \$$amount?', true));
@@ -1685,6 +1324,7 @@ class CareerController extends ChangeNotifier {
     rel.topicUnresolved = advanced.unresolved;
     rel.topicTurnsActive = advanced.turnsActive;
     rel.lastQuestionAnswered = true;
+    rel.pendingQuestionId = null;
 
     rel.turnCount += 1;
     _openPendingInteraction(rel, type: InteractionType.request, topic: Topic.money, subject: 'money ask');
@@ -1697,7 +1337,11 @@ class CareerController extends ChangeNotifier {
       day: day,
       level: level,
       phase: levelPhase,
-      importance: MemoryImportance.medium,
+      // A money ask is a real exchange worth remembering for days, not just
+      // the next few turns — the new "high" tier (Phase 11), not "medium"
+      // (which now means a lighter conversational-continuity move; see
+      // _conversationImportance's doc comment).
+      importance: MemoryImportance.high,
     ));
 
     final outcome = _resolveMoneyAskOutcome(amount, rel);
@@ -1736,12 +1380,15 @@ class CareerController extends ChangeNotifier {
       isWeekend: isWeekend,
       currentTopic: rel.currentTopic,
       topicProgress: rel.topicProgress,
+      topicSubject: rel.topicSubject,
       levelPhase: levelPhase,
       recentConversation: rel.recentConversation,
       facts: rel.facts,
       honesty: rel.honesty,
       reliability: rel.reliability,
       responsiveness: rel.responsiveness,
+      personality: p.personality,
+      conversationDepth: rel.conversationDepth,
     );
     final pool = kMamaMoneyAskReactions[outcome]!;
     final line = pickLine(_rng, pool, ctx, currentDay: day, lineLastUsedDay: rel.lineLastUsedDay, recentLineHistory: rel.recentLineHistory) ?? pool.first;
@@ -1758,7 +1405,11 @@ class CareerController extends ChangeNotifier {
       day: day,
       level: level,
       phase: levelPhase,
-      importance: MemoryImportance.medium,
+      // A money ask is a real exchange worth remembering for days, not just
+      // the next few turns — the new "high" tier (Phase 11), not "medium"
+      // (which now means a lighter conversational-continuity move; see
+      // _conversationImportance's doc comment).
+      importance: MemoryImportance.high,
     ));
     _pruneConversationMemory(rel);
     notifyListeners();
@@ -1779,13 +1430,25 @@ class CareerController extends ChangeNotifier {
 
   /// How much weight a [ConversationEvent] carries in
   /// [RelationshipState.recentConversation] — see [_pruneConversationMemory]
-  /// for how this drives eviction, and [_permanentMemoryFor] for which
+  /// for how this drives eviction (Phase 11: turns for low/medium, days for
+  /// high, permanent for critical), and [_permanentMemoryFor] for which
   /// intents also get promoted into the permanent [RelationshipState.memories]
   /// log. A legacy free-text-derived turn (conversationIntent == null) is
   /// always low — there's no chip-level signal to weigh it by.
+  ///
+  /// [critical] and [high] are unchanged from before Phase 11 (previously
+  /// named `high`/`medium`) — confront/questionLoyalty/makePeace were always
+  /// the "permanent milestone" set, apologize/insult/askAboutFamily/etc. were
+  /// always the "real exchange, not small talk" set. What's new is [medium]:
+  /// carved out of the old flat `low` catch-all for intents that are still
+  /// conversational moves rather than substance (checkIn, elaborate, deflect
+  /// — about whether/how the thread continues) but read as a notch more
+  /// deliberate than a bare greeting or a "lol" — so they get a slightly
+  /// longer window (~10 turns) than pure social lubricant (~3 turns)
+  /// without competing with genuinely substantive content for space.
   static MemoryImportance _conversationImportance(ConversationIntent? intent) {
-    const high = {ConversationIntent.confront, ConversationIntent.questionLoyalty, ConversationIntent.makePeace};
-    const medium = {
+    const critical = {ConversationIntent.confront, ConversationIntent.questionLoyalty, ConversationIntent.makePeace};
+    const high = {
       ConversationIntent.apologize,
       ConversationIntent.insult,
       ConversationIntent.askAboutFamily,
@@ -1798,42 +1461,74 @@ class CareerController extends ChangeNotifier {
       ConversationIntent.askWhatsGoingOn,
       ConversationIntent.askAboutWork,
     };
+    const medium = {ConversationIntent.checkIn, ConversationIntent.elaborate, ConversationIntent.deflect};
     if (intent == null) return MemoryImportance.low;
+    if (critical.contains(intent)) return MemoryImportance.critical;
     if (high.contains(intent)) return MemoryImportance.high;
     if (medium.contains(intent)) return MemoryImportance.medium;
     return MemoryImportance.low;
   }
 
-  /// A high-importance turn is charged enough to outlive
+  /// A critical-importance turn is charged enough to outlive
   /// [RelationshipState.recentConversation]'s rolling window entirely — it
   /// gets promoted into the permanent [MemoryEvent] log the same way
   /// [MemoryKind.firstWarmReply] already does elsewhere. Returns null for an
-  /// intent that's high-importance for the moment but isn't the kind of
+  /// intent that's critical-importance for the moment but isn't the kind of
   /// thing worth a permanent milestone (none currently — every entry in
-  /// [_conversationImportance]'s `high` set maps to one).
+  /// [_conversationImportance]'s `critical` set maps to one).
   static MemoryKind? _permanentMemoryFor(ConversationIntent intent) => switch (intent) {
         ConversationIntent.confront || ConversationIntent.questionLoyalty => MemoryKind.deepConfession,
         ConversationIntent.makePeace => MemoryKind.promiseMade,
         _ => null,
       };
 
-  /// Bounds [RelationshipState.recentConversation]: low-importance turns
-  /// (small talk) expire the day after they happen, medium-importance turns
-  /// (arguments, apologies, real questions) last 3 days, and high-importance
-  /// turns are never day-pruned — only the hard 12-entry cap below can push
-  /// one out, and by then it's already been promoted to a permanent memory
-  /// (see [_permanentMemoryFor]). Called after every new turn and once more
-  /// on each morning tick, so a quiet contact's window still ages out even
-  /// on days the player never opens their thread.
+  /// Grace window (in [RelationshipState.turnCount] turns) before a
+  /// [MemoryImportance.low] turn is pruned from
+  /// [RelationshipState.recentConversation] — pure social lubricant ("lol",
+  /// a bare greeting) that shouldn't linger long enough to compete with
+  /// anything that actually matters. See [_pruneConversationMemory].
+  static const int kLowImportanceTurnWindow = 3;
+
+  /// [kLowImportanceTurnWindow]'s counterpart for [MemoryImportance.medium]
+  /// — a conversational-continuity move (checkIn, elaborate, deflect) reads
+  /// as a bit more deliberate than pure filler, so it earns a longer window,
+  /// still turn-granular rather than day-granular since it's still ordinary
+  /// small-talk-adjacent pacing, not a real topic.
+  static const int kMediumImportanceTurnWindow = 10;
+
+  /// Grace window (in game [day]s) before a [MemoryImportance.high] turn is
+  /// pruned — day-granular rather than turn-granular because "a real
+  /// exchange from earlier this week" is the thing being modeled, not "a few
+  /// messages ago." "Several days," per Phase 11's own framing.
+  static const int kHighImportanceDayWindow = 5;
+
+  /// Bounds [RelationshipState.recentConversation] (Phase 11): [low]-
+  /// importance turns (small talk — "lol") expire after
+  /// [kLowImportanceTurnWindow] turns, [medium] after
+  /// [kMediumImportanceTurnWindow] turns, [high]-importance turns (arguments,
+  /// apologies, real questions) after [kHighImportanceDayWindow] days, and
+  /// [critical] turns are never pruned by age — only the hard 12-entry cap
+  /// below can push one out, and by then it's already been promoted to a
+  /// permanent memory (see [_permanentMemoryFor]). Turn-based windows read
+  /// against [RelationshipState.turnCount] (only a reply to this contact
+  /// advances it — the same constraint [isOverdue] documents), so a low/
+  /// medium turn effectively ages out relative to how much has since been
+  /// said to this contact, not relative to the calendar. Called after every
+  /// new turn and once more on each morning tick, so a quiet contact's
+  /// day-based ([high]) window still ages out even on days the player never
+  /// opens their thread — a quiet contact's turn-based ([low]/[medium])
+  /// windows don't need that second call, since nothing advances turnCount
+  /// without a reply anyway.
   void _pruneConversationMemory(RelationshipState rel) {
     rel.recentConversation.removeWhere((e) {
-      final age = day - e.day;
       switch (e.importance) {
         case MemoryImportance.low:
-          return age >= 1;
+          return rel.turnCount - e.turn >= kLowImportanceTurnWindow;
         case MemoryImportance.medium:
-          return age >= 3;
+          return rel.turnCount - e.turn >= kMediumImportanceTurnWindow;
         case MemoryImportance.high:
+          return day - e.day >= kHighImportanceDayWindow;
+        case MemoryImportance.critical:
           return false;
       }
     });
@@ -1885,73 +1580,109 @@ class CareerController extends ChangeNotifier {
     }
   }
 
-  /// Higher favors surfacing [a] in [personalReplyOptions] right now.
-  /// Additive nudges on a base of 1.0 — not a formal formula like the
-  /// engine's [pickLine] weights, just enough of a thumb on the scale that
-  /// contextually sensible options rise to the top of the cut.
-  static double _personalReplyOptionScore(
-    PersonalReplyAction a, {
-    required RelationshipState rel,
-    required bool threadEmpty,
-    required TimeOfDay tod,
-    required int level,
-  }) {
-    var score = 1.0;
-
-    if (threadEmpty) {
-      // Opening a conversation favors a greeting; leading with a dismissal
-      // reads as a non-sequitur when nothing's been said yet.
-      if (a.topics.contains(Topic.greeting)) score += 5;
-      if (a.intent == Intent.dismissal) score -= 3;
+  /// Phase 10: marks any promise/request [PendingInteraction] whose deadline
+  /// has passed as [PendingInteraction.broken] and applies the relationship
+  /// consequence — a real, measurable hit to reliability/trust, not just a
+  /// status flag no caller reads. Never a question — see
+  /// [PendingInteraction.broken]'s doc comment for why that type is excluded.
+  /// Called from [personalReplyAction] only: [isOverdue] compares against
+  /// [RelationshipState.turnCount], which nothing but a reply advances, so
+  /// this can't usefully run on the passive tick/day cadence instead — a
+  /// broken commitment surfaces the next time the player actually talks to
+  /// this contact, not silently in the background.
+  void _breakOverdueInteractions(RelationshipState rel) {
+    for (final interaction in rel.pendingInteractions) {
+      if (interaction.type == InteractionType.question) continue;
+      if (!isOverdue(interaction, rel.turnCount)) continue;
+      interaction.resolved = true;
+      interaction.broken = true;
+      rel.reliability = nudgeReliability(rel.reliability, delta: -3.0);
+      rel.trust = (rel.trust - 2).clamp(0, 100);
+      recordMemory(rel.memories, MemoryEvent(MemoryKind.brokenPromise, day));
     }
+  }
 
-    // Staying on the thread's live topic favors continuing it.
-    if (rel.currentTopic != null && a.topics.contains(rel.currentTopic)) score += 4;
+  /// Resolves [template]'s [PersonalReplyAction.phrasings] pool down to the
+  /// single line this turn actually sends — the same pickLine()-driven,
+  /// repeat-avoiding selection [sendIntent] already used to do by hand for an
+  /// [IntentChip], now generalized so every [PersonalReplyAction] (catalog,
+  /// story-context, or chip-originated) goes through one resolution path.
+  /// [turnPhase] is passed in rather than read fresh via [levelPhase], since
+  /// [personalReplyAction] captures it before clearing [recentStoryEvent] —
+  /// see that method's own comment on why the order matters.
+  ///
+  /// Mirrors [IntentChip.phrasings]' override contract exactly: whichever
+  /// (tone, topic, intent, subject, resolvesThread, establishesFacts,
+  /// fulfillsPromise, isVulnerableDisclosure) the picked [DialogueLine]
+  /// specifies wins over [template]'s own fallback value for that same axis;
+  /// everything else carries over unchanged. Returns a new
+  /// [PersonalReplyAction] with [PersonalReplyAction.phrasings] narrowed to
+  /// exactly that one line, so [PersonalReplyAction.text] resolves to it.
+  PersonalReplyAction _resolvePersonalReplyAction(
+    PersonalReplyAction template,
+    RelationshipState rel,
+    PersonalContact p,
+    LevelPhase turnPhase,
+  ) {
+    final ctx = DialogueContext(
+      mood: rel.mood,
+      closeness: rel.closeness,
+      trust: rel.trust,
+      suspicion: rel.suspicion,
+      daysSinceReply: rel.daysSinceReply,
+      recentTones: rel.recentTones,
+      memories: rel.memories,
+      timeOfDay: timeOfDay,
+      isWeekend: isWeekend,
+      currentTopic: rel.currentTopic,
+      topicProgress: rel.topicProgress,
+      topicSubject: rel.topicSubject,
+      playerTopicsToday: rel.topicsDiscussedToday,
+      levelPhase: turnPhase,
+      recentConversation: rel.recentConversation,
+      facts: rel.facts,
+      honesty: rel.honesty,
+      reliability: rel.reliability,
+      responsiveness: rel.responsiveness,
+      personality: p.personality,
+      conversationDepth: rel.conversationDepth,
+    );
+    final line = pickLine(
+          _rng,
+          template.phrasings,
+          ctx,
+          currentDay: day,
+          lineLastUsedDay: rel.lineLastUsedDay,
+          recentLineHistory: rel.recentLineHistory,
+        ) ??
+        template.phrasings.first;
+    recordLineUse(rel.lineLastUsedDay, rel.recentLineHistory, line, day);
 
-    // A question left hanging favors an actual answer over a dodge.
-    if (!rel.lastQuestionAnswered && a.intent == Intent.dismissal) score -= 3;
-
-    // Money already on the table favors the money-tagged options.
-    if (a.isDebtTopic && (rel.debt > 25 || rel.currentTopic == Topic.money)) score += 4;
-
-    // Tense or fraying favors de-escalating; low trust favors honesty.
-    if (rel.fear > 40 && a.tone == ReplyTone.warm) score += 2;
-    if (rel.suspicion > 50 && (a.tone == ReplyTone.warm || a.tone == ReplyTone.honest)) score += 2;
-    if (rel.trust < 30 && a.tone == ReplyTone.honest) score += 2;
-
-    // Mood-aware nudges — when she's hurt, warm/repair options rise; cold sinks.
-    if (rel.mood < -30 && (a.tone == ReplyTone.warm || a.intent == Intent.promise)) score += 4;
-    if (rel.mood < -30 && (a.tone == ReplyTone.cold || a.intent == Intent.dismissal)) score -= 4;
-    if (rel.mood < -10 && a.intent == Intent.dismissal) score -= 2;
-    if (rel.mood > 30 && a.topics.contains(Topic.affection)) score += 2;
-    if (rel.mood > 30 && (a.topics.contains(Topic.wellbeing) || a.topics.contains(Topic.goodNews))) score += 1;
-
-    // Time of day colors what reads naturally to bring up.
-    switch (tod) {
-      case TimeOfDay.morning:
-        if (a.topics.contains(Topic.greeting) || a.topics.contains(Topic.wellbeing)) score += 2;
-        break;
-      case TimeOfDay.afternoon:
-        if (a.topics.contains(Topic.family) || a.topics.contains(Topic.suspicion) || a.isDebtTopic) score += 2;
-        break;
-      case TimeOfDay.evening:
-      case TimeOfDay.night:
-        if (a.topics.contains(Topic.affection) || a.intent == Intent.promise) score += 2;
-        break;
-    }
-
-    // Story-level nudges — options that fit the current level of tension
-    // score higher so the most contextually appropriate ones rise to the top
-    // of the cut without needing to hard-exclude others.
-    if (a.showWhenLevelMin != null && level >= a.showWhenLevelMin!) score += 2;
-    if (a.showWhenLevelMax != null && level <= a.showWhenLevelMax!) score += 1;
-    // High-suspicion options score higher when the character is already worried.
-    if (a.showWhenSuspicionAbove != null && rel.suspicion > (a.showWhenSuspicionAbove! + 15)) score += 2;
-    // Trust-gated options score higher when trust matches their intent.
-    if (a.showWhenTrustAbove != null && rel.trust > (a.showWhenTrustAbove! + 10)) score += 1;
-    if (a.showWhenClosenessAbove != null && rel.closeness > (a.showWhenClosenessAbove! + 10)) score += 1;
-
-    return score;
+    return PersonalReplyAction(
+      template.label,
+      phrasings: [line],
+      tone: line.tone ?? template.tone,
+      topics: line.topic != null ? {line.topic!, ...template.topics} : template.topics,
+      intent: line.intent ?? template.intent,
+      intensity: template.intensity,
+      isDebtTopic: template.isDebtTopic,
+      allowedContacts: template.allowedContacts,
+      conversationIntent: template.conversationIntent,
+      subject: line.subject ?? template.subject,
+      resolvesThread: line.resolvesThread || template.resolvesThread,
+      establishesFacts: line.establishesFacts ?? template.establishesFacts,
+      fulfillsPromise: line.fulfillsPromise || template.fulfillsPromise,
+      isVulnerableDisclosure: line.isVulnerableDisclosure || template.isVulnerableDisclosure,
+      showWhenMoodBelow: template.showWhenMoodBelow,
+      showWhenMoodAbove: template.showWhenMoodAbove,
+      requiresThread: template.requiresThread,
+      showWhenLevelMin: template.showWhenLevelMin,
+      showWhenLevelMax: template.showWhenLevelMax,
+      showWhenTrustBelow: template.showWhenTrustBelow,
+      showWhenTrustAbove: template.showWhenTrustAbove,
+      showWhenSuspicionAbove: template.showWhenSuspicionAbove,
+      showWhenClosenessAbove: template.showWhenClosenessAbove,
+    );
   }
 
   /// Reply to [contactId] by picking a [PersonalReplyAction] (from
@@ -1961,9 +1692,20 @@ class CareerController extends ChangeNotifier {
   /// self-classifying. Applies the relationship-stat deltas scaled by
   /// [impactMultiplier] and picks a same-turn reaction line, identically to
   /// how the old free-text path did once classification was done.
+  ///
+  /// [action] arrives as a template — [PersonalReplyAction.phrasings] may
+  /// hold several candidate wordings — and the very first thing this method
+  /// does is resolve it down to the one line this turn actually sends (see
+  /// [_resolvePersonalReplyAction]), reassigning the parameter so every
+  /// `action.*` read below (topic advancement, stat deltas, spam tracking,
+  /// the sent [Message], ...) already reflects that line's own overrides.
   void personalReplyAction(String contactId, PersonalReplyAction action) {
     final rel = relationships[contactId]!;
     if (rel.goneQuiet || rel.resolved || rel.isBlocked) return;
+    // Phase 10: a promise/request whose deadline already passed breaks the
+    // moment the player next talks to this contact, before this turn's own
+    // action is processed — see _breakOverdueInteractions's doc comment.
+    _breakOverdueInteractions(rel);
     // Captured before recentStoryEvent is cleared below — [levelPhase]
     // reads recentStoryEvent to detect LevelPhase.cusp, so evaluating it
     // after the clear would make cusp permanently unreachable from this
@@ -1973,6 +1715,7 @@ class CareerController extends ChangeNotifier {
     // speak about) whatever just happened. The tray resets to its normal state.
     recentStoryEvent = null;
     final p = kPersonalContact[contactId]!;
+    action = _resolvePersonalReplyAction(action, rel, p, turnPhase);
     final impact = impactMultiplier(action.intensity);
 
     // Captured before advanceTopic overwrites it — planResponse() needs to
@@ -1999,6 +1742,22 @@ class CareerController extends ChangeNotifier {
     rel.topicUnresolved = advanced.unresolved;
     rel.topicTurnsActive = advanced.turnsActive;
 
+    // Conversation depth (Phase 16): classifies THIS turn from what was
+    // just said, then combines it with the thread's existing depth — see
+    // advanceDepth()'s doc comment for why escalation is immediate but
+    // de-escalation only steps down one level at a time. Placed after
+    // advanceTopic() so classifyDepth() reads the just-updated currentTopic,
+    // not the prior turn's.
+    rel.conversationDepth = advanceDepth(
+      rel.conversationDepth,
+      classifyDepth(
+        conversationIntent: action.conversationIntent,
+        topic: rel.currentTopic,
+        intensity: action.intensity,
+        isVulnerableDisclosure: action.isVulnerableDisclosure,
+      ),
+    );
+
     // Was a question mama asked left dangling? A dismissal ("whatever",
     // "nvm") while one's pending is a dodge — surfaces for exactly this
     // reply via questionJustDodged, then clears either way (the question
@@ -2009,7 +1768,10 @@ class CareerController extends ChangeNotifier {
     final questionWasPending = !rel.lastQuestionAnswered;
     final resolved = resolvePendingQuestion(wasAnswered: rel.lastQuestionAnswered, messageIntent: action.intent);
     rel.lastQuestionAnswered = resolved.answered;
-    if (resolved.answered) _resolvePendingInteraction(rel, InteractionType.question);
+    if (resolved.answered) {
+      _resolvePendingInteraction(rel, InteractionType.question);
+      rel.pendingQuestionId = null;
+    }
     final dodgedNow = resolved.justDodged;
 
     // Behavioral reputation (Phase 9): a dodge PATTERN, not just this one
@@ -2036,14 +1798,24 @@ class CareerController extends ChangeNotifier {
     // increment above so createdTurn lines up with the same turn number this
     // turn's ConversationEvent below is logged under, not the prior turn's.
     if (action.intent == Intent.promise) {
-      _openPendingInteraction(rel, type: InteractionType.promise, topic: rel.currentTopic, subject: action.subject);
+      _openPendingInteraction(
+        rel,
+        type: InteractionType.promise,
+        topic: rel.currentTopic,
+        subject: action.subject,
+        deadlineTurn: rel.turnCount + kDefaultPromiseDeadlineTurns,
+      );
     }
 
-    // A promise explicitly kept (Phase 9) — the "kept" half of reliability
-    // tracking only; see fulfillsPromise's doc comment for why the "broken"
-    // half (deadline expiry) isn't wired.
+    // A promise explicitly kept (Phase 9) — resolves both a promise the
+    // player made themselves (InteractionType.promise) and one Mama asked
+    // for (InteractionType.request, opened via DialogueLine.requestsPromise
+    // — Phase 10): from the player's side, "I did what I said I would" reads
+    // the same regardless of who first raised it. Either resolve is a no-op
+    // if nothing of that type is currently open.
     if (action.fulfillsPromise) {
       _resolvePendingInteraction(rel, InteractionType.promise);
+      _resolvePendingInteraction(rel, InteractionType.request);
       rel.reliability = nudgeReliability(rel.reliability);
       rel.trust = (rel.trust + 0.5).clamp(0, 100);
     }
@@ -2077,13 +1849,13 @@ class CareerController extends ChangeNotifier {
     // A handful of intents mark a real relationship moment, not small talk —
     // promote those into the existing permanent [memories] log so they
     // outlive the rolling window's cap even after it's pruned or evicted.
-    if (turnImportance == MemoryImportance.high) {
+    if (turnImportance == MemoryImportance.critical) {
       final kind = _permanentMemoryFor(action.conversationIntent!);
       if (kind != null) recordMemory(rel.memories, MemoryEvent(kind, day));
     }
     _pruneConversationMemory(rel);
 
-    personalThreads[contactId]!.add(Message(action.resolveText(rel, timeOfDay), true));
+    personalThreads[contactId]!.add(Message(action.text, true));
 
     switch (action.tone) {
       case ReplyTone.warm:
@@ -2171,7 +1943,7 @@ class CareerController extends ChangeNotifier {
       (e) =>
           e.topic == rel.currentTopic &&
           e.turn < myTurn &&
-          (e.importance == MemoryImportance.medium || e.importance == MemoryImportance.high),
+          e.importance != MemoryImportance.low,
     );
     final plan = planResponse(
       actionIntent: action.conversationIntent,
@@ -2297,6 +2069,7 @@ class CareerController extends ChangeNotifier {
         isWeekend: isWeekend,
         currentTopic: rel.currentTopic,
         topicProgress: rel.topicProgress,
+        topicSubject: rel.topicSubject,
         playerTopics: action.topics,
         playerIntent: action.intent,
         questionJustDodged: dodgedNow,
@@ -2310,6 +2083,8 @@ class CareerController extends ChangeNotifier {
         honesty: rel.honesty,
         reliability: rel.reliability,
         responsiveness: rel.responsiveness,
+        personality: p.personality,
+        conversationDepth: rel.conversationDepth,
       );
       final reaction = pickLine(
         _rng,
@@ -2338,6 +2113,28 @@ class CareerController extends ChangeNotifier {
         if (reaction.intent == Intent.question) {
           rel.lastQuestionAnswered = false;
           _openPendingInteraction(rel, type: InteractionType.question, topic: reaction.topic, subject: reaction.subject);
+        }
+        // The bespoke-tray trigger is broader than the dodge-tracked
+        // "pending question" state above: Mama's line doesn't have to be
+        // grammatically a question to deserve a tray built around exactly
+        // what she just said (see DialogueLine.questionId's doc comment and
+        // reply_tray.dart's kQuestionAnswerChips lookup) — a loaded
+        // STATEMENT ("I ran into your ex today...") can just as easily carry
+        // one. Any tagged line sets it, independent of intent.
+        if (reaction.questionId != null) {
+          rel.pendingQuestionId = reaction.questionId;
+        }
+        // Phase 10: Mama's reply itself asks the player to commit to
+        // something concrete (e.g. "Promise me you'll call your grandma") —
+        // opens a request with a deadline, same as the question case above.
+        if (reaction.requestsPromise) {
+          _openPendingInteraction(
+            rel,
+            type: InteractionType.request,
+            topic: reaction.topic,
+            subject: reaction.subject,
+            deadlineTurn: rel.turnCount + (reaction.promiseDeadlineTurns ?? kDefaultPromiseDeadlineTurns),
+          );
         }
       } else {
         // Every line in `pool` got gated out for the current relationship
@@ -2377,7 +2174,7 @@ class CareerController extends ChangeNotifier {
         if (rel == null) continue;
         rel.todayActionCounts.clear();
         rel.topicsDiscussedToday.clear();
-        _pruneConversationMemory(rel); // ages out low/medium-importance conversation events even on a day the player never opens this thread
+        _pruneConversationMemory(rel); // ages out high-importance (day-based) conversation events even on a day the player never opens this thread; low/medium (turn-based) can't age without a reply anyway
       }
     }
     for (final p in kPersonalContacts) {
@@ -2497,7 +2294,16 @@ class CareerController extends ChangeNotifier {
             isWeekend: isWeekend,
             currentTopic: rel.currentTopic,
             topicProgress: rel.topicProgress,
+            topicSubject: rel.topicSubject,
             playerTopicsToday: rel.topicsDiscussedToday,
+            // Phase 12: an unprompted opener can carry requiredFacts/
+            // requiredEventTopic (e.g. the coverJob callback) same as a
+            // reaction line — both need facts/recentConversation to actually
+            // be checkable here, which this ctx never carried before.
+            recentConversation: rel.recentConversation,
+            facts: rel.facts,
+            personality: p.personality,
+            conversationDepth: rel.conversationDepth,
           );
           final line = pickLine(
             _rng,
@@ -2531,6 +2337,23 @@ class CareerController extends ChangeNotifier {
             if (line.intent == Intent.question) {
               rel.lastQuestionAnswered = false;
               _openPendingInteraction(rel, type: InteractionType.question, topic: line.topic, subject: line.subject);
+            }
+            // Same broadening as the reaction path above — an unprompted
+            // line doesn't have to be a grammatical question to deserve a
+            // tray built around exactly what Mama just said.
+            if (line.questionId != null) {
+              rel.pendingQuestionId = line.questionId;
+            }
+            // Phase 10: same wiring as the reaction path above, for a line
+            // Mama sends unprompted rather than in reply to the player.
+            if (line.requestsPromise) {
+              _openPendingInteraction(
+                rel,
+                type: InteractionType.request,
+                topic: line.topic,
+                subject: line.subject,
+                deadlineTurn: rel.turnCount + (line.promiseDeadlineTurns ?? kDefaultPromiseDeadlineTurns),
+              );
             }
           }
         }
@@ -2591,6 +2414,10 @@ class CareerController extends ChangeNotifier {
   @override
   void dispose() {
     _sightingTimer?.cancel();
+    _sightingGapTimer?.cancel();
+    _collectorGapTimer?.cancel();
+    _level4GapTimer?.cancel();
+    _strategicGapTimer?.cancel();
     super.dispose();
   }
 }

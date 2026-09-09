@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:meridian_private/content/mama_reactions.dart';
 import 'package:meridian_private/controller.dart';
 import 'package:meridian_private/conversation/intents.dart';
+import 'package:meridian_private/conversation/reply_tray.dart';
 import 'package:meridian_private/data.dart';
 
 /// Advances the relationship engine by one beat using Level 4's monthly
@@ -12,6 +13,7 @@ void _tick(CareerController g) {
   g.closeMonth();
   g.pendingIncursion = null;
   g.pendingTrouble = null;
+  g.level4Busy = false; // this helper drives ticks instantly, not in real time
 }
 
 // Reply actions picked by (tone, topic, intent) for each test's purpose —
@@ -29,6 +31,20 @@ final _wellbeingAction = kPersonalReplyActions.firstWhere((a) => a.label == 'Ask
 final _vagueAction = kPersonalReplyActions.firstWhere((a) => a.label == 'Stay vague');
 final _deflectMoneyAction = kPersonalReplyActions.firstWhere((a) => a.label == 'Deflect about money');
 final _settleMoneyAction = kPersonalReplyActions.firstWhere((a) => a.label == 'Talk about money');
+
+/// Guards the Phase 2/3 near-miss documented at the top of
+/// kPersonalReplyActions (data.dart): these labels are the generic,
+/// high-traffic legacy actions this test file already uses above as neutral
+/// (tone, topic, intent) fixtures to exercise the engine's cross-cutting
+/// reactive machinery (acknowledgesDodge/acknowledgesToneShift/
+/// acknowledgesAnsweredQuestion, requiredFacts, honesty/reliability gating,
+/// the questionId bespoke-tray lines) — machinery that lives only in the
+/// generic kPersonalReactions pool. Tagging any of them with a
+/// conversationIntent silently reroutes Mama's reply to an isolated pool
+/// that doesn't replicate any of that, which is a real behavior regression
+/// (confirmed: doing this once broke ~10 engine tests), not just a
+/// test-fixture inconvenience — so this is a standing guard, not a one-off.
+const _mustStayGeneric = ['Greet', 'Reassure', 'Be honest', 'Ask how they are', 'Ask about family', 'Push for answers', 'Stay vague', 'Make an excuse', 'Brush off', 'Insult', 'Talk about money', 'Deflect about money', 'Check in', 'Reassure her'];
 
 void main() {
   group('Relationship engine', () {
@@ -323,6 +339,294 @@ void main() {
         withPendingQuestion.intersection(dodgeTaggedCold).length,
         greaterThan(withoutPendingQuestion.intersection(dodgeTaggedCold).length),
       );
+    });
+
+    test('a pending question with a bespoke answer-chip set fully replaces the tray', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      rel.lastQuestionAnswered = false;
+      rel.pendingQuestionId = 'mama_wellbeing_checkin';
+
+      final options = g.personalReplyOptions('mama');
+      final labels = options.map((o) => o.displayLabel(rel, g.timeOfDay)).toList();
+
+      expect(options.length, kQuestionAnswerChips['mama_wellbeing_checkin']!.length);
+      expect(labels, containsAll(["(Say It's Going Well)", "(Say It's Been Difficult)", '(Avoid The Question)']));
+      // None of the ordinary tray's chips (context chips, Explain More, the
+      // Mama legacy actions) leak in alongside the bespoke set — the whole
+      // point is that the tray becomes exactly "how do you answer this."
+      expect(labels, isNot(contains('(Explain More)')));
+    });
+
+    test('a pending question with no bespoke answer-chip set falls through to the ordinary tray', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      rel.lastQuestionAnswered = false;
+      rel.pendingQuestionId = 'some_question_nobody_authored_chips_for';
+
+      final options = g.personalReplyOptions('mama');
+      expect(options, isNotEmpty);
+      expect(options.length, isNot(kQuestionAnswerChips['mama_wellbeing_checkin']!.length));
+    });
+
+    test('answering a bespoke question chip clears pendingQuestionId; dodging it does not', () {
+      final answerChip = kQuestionAnswerChips['mama_wellbeing_checkin']!.firstWhere((a) => a.label == "Say It's Going Well");
+      final dodgeChip = kQuestionAnswerChips['mama_wellbeing_checkin']!.firstWhere((a) => a.label == 'Avoid The Question');
+
+      final answered = CareerController();
+      addTearDown(answered.dispose);
+      answered.relationships['mama']!.lastQuestionAnswered = false;
+      answered.relationships['mama']!.pendingQuestionId = 'mama_wellbeing_checkin';
+      answered.personalReplyAction('mama', answerChip);
+      expect(answered.relationships['mama']!.pendingQuestionId, isNull);
+
+      final dodged = CareerController();
+      addTearDown(dodged.dispose);
+      dodged.relationships['mama']!.lastQuestionAnswered = false;
+      dodged.relationships['mama']!.pendingQuestionId = 'mama_wellbeing_checkin';
+      dodged.personalReplyAction('mama', dodgeChip);
+      expect(dodged.relationships['mama']!.pendingQuestionId, 'mama_wellbeing_checkin');
+    });
+
+    test('mama asking a wellbeing check-in question sets pendingQuestionId to mama_wellbeing_checkin', () {
+      // _wellbeingAction ('Ask how they are') has no conversationIntent, so
+      // it routes to kPersonalReactions['mama'][ReplyTone.honest] — exactly
+      // the pool the wellbeing-checkin cluster is tagged in (data.dart), and
+      // its `when: _playerAskedAQuestion` gate is satisfied by this action's
+      // own Intent.question.
+      final found = <bool>[];
+      for (var i = 0; i < 40; i++) {
+        final g = CareerController();
+        addTearDown(g.dispose);
+        g.personalReplyAction('mama', _wellbeingAction);
+        if (g.relationships['mama']!.pendingQuestionId == 'mama_wellbeing_checkin') {
+          found.add(true);
+          break;
+        }
+      }
+      expect(found, isNotEmpty, reason: 'expected at least one of 40 trials to land on a wellbeing_checkin-tagged reaction line');
+    });
+
+    test("Phase 2: 'Messed up at work' always routes to its own admitMistake pool, never the generic suspicion self-report cluster", () {
+      // Regression for the exact bug that motivated the Phase 2 migration —
+      // before ConversationIntent.admitMistake existed, this chip competed
+      // in the generic Topic.wellbeing/honest pool, where pickLine()'s
+      // tangent bucket could occasionally land on an unrelated
+      // Topic.suspicion self-report line ("Okay fine, I've been a little
+      // stressed"). Now that the chip carries conversationIntent, it's
+      // routed straight to kMamaIntentReactions[admitMistake][honest] and
+      // never touches the generic pool at all — checked across many trials
+      // since pickLine is still randomized WITHIN that isolated pool.
+      final admitMistakeTexts = kMamaIntentReactions[ConversationIntent.admitMistake]![ReplyTone.honest]!.map((l) => l.text).toSet();
+      for (var i = 0; i < 40; i++) {
+        final g = CareerController();
+        addTearDown(g.dispose);
+        g.strikes = 1;
+        final chip = g.personalReplyOptions('mama').whereType<StoryChipOption>().firstWhere((o) => o.action.label == 'Messed up at work');
+        g.personalReplyAction('mama', chip.action);
+        expect(g.personalThreads['mama']!.last.text, isIn(admitMistakeTexts));
+      }
+    });
+
+    test("mama's suspicion self-report lines ('I'm fine, don't worry about me') require the player to have actually asked a question", () {
+      // Regression for the "Okay fine, I've been a little stressed" bug:
+      // these lines are Mama answering FOR HERSELF, so pickLine()'s tangent
+      // bucket could otherwise reach for one (they carry unusually high
+      // weight, 2.0-3.0) as a non-sequitur reply to an unrelated confession
+      // like "Had a rough one at work today. Almost blew it." Checked in
+      // both pools that carry this cluster (warm and honest).
+      const askedCtx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], playerIntent: Intent.question,
+      );
+      const statedCtx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], playerIntent: Intent.confession,
+      );
+      final warmLine = kPersonalReactions['mama']![ReplyTone.warm]!.firstWhere((l) => l.text.startsWith('Ay mijo, you always could tell'));
+      final honestLine = kPersonalReactions['mama']![ReplyTone.honest]!.firstWhere((l) => l.text.startsWith('Okay fine.'));
+      for (final line in [warmLine, honestLine]) {
+        expect(line.isEligible(askedCtx), isTrue, reason: '${line.text} should be eligible once the player actually asked');
+        expect(line.isEligible(statedCtx), isFalse, reason: '${line.text} should NOT be eligible for an unrelated confession/statement');
+      }
+    });
+
+    test('the brother-distant opener line is tagged for its own bespoke reply-stance tray', () {
+      // Deterministic content check (not a probabilistic pipeline run, since
+      // this line only lives in the unprompted `openers` pool where a real
+      // trial would compete against ~50 other untagged lines) — this is the
+      // item 6 example ("your brother said you've been distant... is he
+      // wrong, mijo?"): a rare, memory-gated callback, not a grammatical
+      // question chosen for its own sake, still wired the same way.
+      final matches = kRelationshipContent['mama']!.openers.where((l) => l.questionId == 'mama_brother_distant').toList();
+      expect(matches, hasLength(1));
+      expect(matches.single.intent, Intent.question);
+      expect(matches.single.topic, Topic.family);
+    });
+
+    test('a pending mama_brother_distant question replaces the tray with the brother-specific stances', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      rel.lastQuestionAnswered = false;
+      rel.pendingQuestionId = 'mama_brother_distant';
+
+      final options = g.personalReplyOptions('mama');
+      final labels = options.map((o) => o.displayLabel(rel, g.timeOfDay)).toList();
+
+      expect(options.length, kQuestionAnswerChips['mama_brother_distant']!.length);
+      expect(
+        labels,
+        containsAll([
+          "(Say Everything's Good)",
+          "(Say You've Been Busy With Work)",
+          '(Admit You Had An Argument)',
+          "(Say You Don't Want To Talk About It)",
+          '(Ask About Her Brother)',
+        ]),
+      );
+    });
+
+    test('the "did you talk to Tono" opener line is tagged for its own bespoke reply-stance tray', () {
+      // Item 7's own worked example ("Did you talk to Marcus?", subject
+      // tracked as 'Tono' in the actual shipped line) — an everyday,
+      // ungated factual check-in, unlike mama_brother_distant's rare
+      // memory-gated callback.
+      final matches = kRelationshipContent['mama']!.openers.where((l) => l.questionId == 'mama_asked_about_tono').toList();
+      expect(matches, hasLength(1));
+      expect(matches.single.intent, Intent.question);
+      expect(matches.single.subject, 'Tono');
+    });
+
+    test('a pending mama_asked_about_tono question replaces the tray with yes/no-shaped stances, then the generic tray returns once answered', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      rel.lastQuestionAnswered = false;
+      rel.pendingQuestionId = 'mama_asked_about_tono';
+
+      final pending = g.personalReplyOptions('mama');
+      final pendingLabels = pending.map((o) => o.displayLabel(rel, g.timeOfDay)).toList();
+      expect(pending.length, kQuestionAnswerChips['mama_asked_about_tono']!.length);
+      expect(
+        pendingLabels,
+        containsAll(['(Answer Yes)', '(Answer No)', '(Explain What Happened)', '(Avoid The Question)', '(Change The Subject)']),
+      );
+
+      // Answering (not dodging) resolves it — the generic tray, with its
+      // much larger and differently-shaped option set, comes back.
+      final answerYes = kQuestionAnswerChips['mama_asked_about_tono']!.firstWhere((a) => a.label == 'Answer Yes');
+      g.personalReplyAction('mama', answerYes);
+      expect(rel.pendingQuestionId, isNull);
+      final afterAnswering = g.personalReplyOptions('mama');
+      expect(afterAnswering.length, isNot(pending.length));
+    });
+
+    test('the generic high-traffic legacy actions never carry a conversationIntent (Phase 2/3 regression guard)', () {
+      for (final label in _mustStayGeneric) {
+        final action = kPersonalReplyActions.firstWhere((a) => a.label == label);
+        expect(action.conversationIntent, isNull, reason: "'$label' must stay on the generic pool — see _mustStayGeneric's doc comment");
+      }
+    });
+
+    test("'Tell her about your day''s morning phrasing is tagged affection/warm, not inherited wellbeing/honest", () {
+      // Regression: this phrasing's text ("thinking of you, Mamá") is purely
+      // affectionate, but it used to carry no topic/tone of its own, so it
+      // fell back to the parent action's {Topic.wellbeing}/honest — which
+      // let mama's reply land on a suspicion-toned "whatever's got you
+      // worried" line for what was actually a warm morning greeting.
+      final action = kPersonalReplyActions.firstWhere((a) => a.label == 'Tell her about your day');
+      final morningLine = action.phrasings.firstWhere((l) => l.text.contains('already thinking of you'));
+      expect(morningLine.topic, Topic.affection);
+      expect(morningLine.tone, ReplyTone.warm);
+    });
+
+    test('the uncle-back chain-starter line is tagged for its bespoke tray', () {
+      // Deterministic content check (same reasoning as the brother/Tono
+      // equivalents) — this line lives in the generic honest/family pool,
+      // not a gated cluster, so a live pipeline run would be probabilistic
+      // against several competing same-topic lines.
+      final matches = kPersonalReactions['mama']![ReplyTone.honest]!.where((l) => l.questionId == 'mama_uncle_back').toList();
+      expect(matches, hasLength(1));
+      expect(matches.single.topic, Topic.family);
+    });
+
+    test('item 11: a two-step action chain — Ask About Family -> Ask About Uncle -> Ask How Mama Is Doing -> converges into mama_wellbeing_checkin', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+
+      // Step 0: force the chain-starter directly (bypassing the probabilistic
+      // draw from the generic pool, same as the other bespoke-tray tests) —
+      // this is what personalReplyAction would eventually land on after
+      // 'Ask about family', just made deterministic for the test.
+      rel.pendingQuestionId = 'mama_uncle_back';
+      final tray1 = g.personalReplyOptions('mama');
+      expect(tray1.length, kQuestionAnswerChips['mama_uncle_back']!.length);
+      expect(tray1.map((o) => o.displayLabel(rel, g.timeOfDay)), contains('(Ask About Uncle)'));
+
+      // Step 1: tap "Ask About Uncle" — its own reply (isolated
+      // ConversationIntent.askAboutUncle pool) carries the SECOND questionId.
+      final askAboutUncle = kQuestionAnswerChips['mama_uncle_back']!.firstWhere((a) => a.label == 'Ask About Uncle');
+      g.personalReplyAction('mama', askAboutUncle);
+      expect(rel.pendingQuestionId, 'mama_uncle_stubborn', reason: 'the chain should have advanced to its second link');
+      expect(g.personalThreads['mama']!.last.text, "He's stubborn. Refuses to rest.");
+
+      final tray2 = g.personalReplyOptions('mama');
+      expect(tray2.length, kQuestionAnswerChips['mama_uncle_stubborn']!.length);
+      expect(tray2.map((o) => o.displayLabel(rel, g.timeOfDay)), contains('(Ask How Mama Is Doing)'));
+
+      // Step 2: tap "Ask How Mama Is Doing" — converges the chain back into
+      // the EXISTING mama_wellbeing_checkin tray (item 2) instead of a new leaf.
+      final askIfOkay = kQuestionAnswerChips['mama_uncle_stubborn']!.firstWhere((a) => a.label == 'Ask How Mama Is Doing');
+      g.personalReplyAction('mama', askIfOkay);
+      expect(rel.pendingQuestionId, 'mama_wellbeing_checkin', reason: 'the chain should converge into the existing wellbeing-checkin tray');
+
+      final tray3 = g.personalReplyOptions('mama');
+      expect(tray3.length, kQuestionAnswerChips['mama_wellbeing_checkin']!.length);
+      expect(tray3.map((o) => o.displayLabel(rel, g.timeOfDay)), contains("(Say It's Going Well)"));
+    });
+
+    test('greeting mama twice in one day draws from the greeting-aware daily-repeat lines, not the generic "you asked me that" ones', () {
+      // Regression: dailyRepeatReactions used to be one untagged pool
+      // written for a repeated QUESTION/STATEMENT ("you asked me that
+      // earlier", "I answered — you didn't see it?") — a total non-sequitur
+      // for a repeated bare greeting like tapping 'Greet' twice in a day.
+      // Topic.greeting-tagged lines were added specifically so pickLine()'s
+      // on-topic tier (Greet's own topics: {Topic.greeting} puts the thread
+      // on that topic) prefers them over the generic ones for this case.
+      final genericDailyRepeatTexts = kRelationshipContent['mama']!.dailyRepeatReactions.where((l) => l.topic == null).map((l) => l.text).toSet();
+      final greetingDailyRepeatTexts = kRelationshipContent['mama']!.dailyRepeatReactions.where((l) => l.topic == Topic.greeting).map((l) => l.text).toSet();
+      expect(genericDailyRepeatTexts, isNotEmpty);
+      expect(greetingDailyRepeatTexts, isNotEmpty);
+
+      // _topicTier is deliberately probabilistic, not a hard topic
+      // exclusion (same design as every other topic-tiering fix in this
+      // session) — the generic lines stay reachable sometimes (the
+      // "initiative" bucket), just no longer dominant. So the meaningful
+      // claim isn't "generic can never appear," it's "greeting-tagged lines
+      // are now reachable at all, and win most of the time" (casual
+      // register weights on-topic at 60% vs. initiative's 20%).
+      var greetingHits = 0, genericHits = 0;
+      for (var i = 0; i < 60; i++) {
+        final g = CareerController();
+        addTearDown(g.dispose);
+        g.personalReplyAction('mama', _greetAction);
+        // A different action in between keeps this a non-consecutive daily
+        // repeat rather than tripping consecutiveActionCount's separate
+        // spam-pool override (spam takes priority over dailyRepeat, and
+        // triggers on just 2 in a row) — same shape as the reported
+        // scenario, which had another message between the two greetings.
+        g.personalReplyAction('mama', _vagueAction);
+        g.personalReplyAction('mama', _greetAction); // second same-label send today -> isDailyRepeat
+        final text = g.personalThreads['mama']!.last.text;
+        if (greetingDailyRepeatTexts.contains(text)) greetingHits++;
+        if (genericDailyRepeatTexts.contains(text)) genericHits++;
+      }
+      expect(greetingHits, greaterThan(0));
+      expect(greetingHits, greaterThan(genericHits));
     });
 
     test('first warm reply records one milestone memory; a second warm reply does not duplicate it', () {
@@ -797,20 +1101,29 @@ void main() {
       expect(seenCusp, contains(phaseLine));
     });
 
-    test("RecentConversationMemory ages out low-importance turns after a day, keeps high-importance ones", () {
+    test("RecentConversationMemory (Phase 11) ages out low-importance turns after ~3 turns, keeps critical ones permanently", () {
       final g = CareerController();
       addTearDown(g.dispose);
       final rel = g.relationships['mama']!;
-      g.sendIntent('mama', ConversationIntent.greet); // low importance
-      g.devJumpToLevel(5); // unlocks makePeace (high importance) without disturbing turnCount semantics
-      g.sendIntent('mama', ConversationIntent.makePeace); // high importance -> promoted to permanent memory too
+      g.sendIntent('mama', ConversationIntent.greet); // low importance, turn 1
+      g.devJumpToLevel(5); // unlocks makePeace (critical importance) without disturbing turnCount semantics
+      g.sendIntent('mama', ConversationIntent.makePeace); // critical importance -> promoted to permanent memory too, turn 2
       expect(rel.recentConversation.length, 2);
       expect(rel.memories.any((m) => m.kind == MemoryKind.promiseMade), isTrue);
 
-      g.day += 2; // simulate day advancing without going through the real day-advance path
-      g.sendIntent('mama', ConversationIntent.greet); // any new turn triggers _pruneConversationMemory as a side effect
+      // Low-importance turns age out relative to turnCount (Phase 11), not
+      // the calendar — advancing days alone (as the old day-based version of
+      // this test did) no longer does anything for a low-importance turn.
+      // 2 turns elapsed so far (greet at turn 1, makePeace at turn 2) —
+      // send just enough more greets to sit one turn short of the window,
+      // then one more to cross it.
+      for (var i = 0; i < CareerController.kLowImportanceTurnWindow - 2; i++) {
+        g.sendIntent('mama', ConversationIntent.greet);
+      }
+      expect(rel.recentConversation.any((e) => e.intent == ConversationIntent.greet && e.turn == 1), isTrue);
+      g.sendIntent('mama', ConversationIntent.greet); // crosses kLowImportanceTurnWindow
       expect(rel.recentConversation.any((e) => e.intent == ConversationIntent.greet && e.turn == 1), isFalse);
-      expect(rel.recentConversation.any((e) => e.intent == ConversationIntent.makePeace), isTrue);
+      expect(rel.recentConversation.any((e) => e.intent == ConversationIntent.makePeace), isTrue); // critical -> never pruned by age
     });
 
     test('Explain More wins a tray slot once a topic thread is live', () {
@@ -952,6 +1265,357 @@ void main() {
     });
   });
 
+  group('Promise/request deadlines (Phase 10)', () {
+    test('a promise-tagged reply opens its pending promise with a real deadline (not the old informational-only null)', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      g.personalReplyAction('mama', _warmAction); // 'Reassure' -> Intent.promise
+      final opened = rel.pendingInteractions.where((p) => p.type == InteractionType.promise).toList();
+      expect(opened, isNotEmpty);
+      expect(opened.last.deadlineTurn, opened.last.createdTurn + kDefaultPromiseDeadlineTurns);
+    });
+
+    test('an overdue unresolved promise breaks on the next reply to this contact, penalizing reliability and trust', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      g.personalReplyAction('mama', _honestAction); // advances turnCount to 1
+      rel.pendingInteractions.add(PendingInteraction(
+        type: InteractionType.promise,
+        subject: 'call Grandma',
+        createdTurn: rel.turnCount,
+        deadlineTurn: 0, // already passed as of the next reply (turnCount is 1 going in)
+      ));
+      final reliabilityBefore = rel.reliability;
+      // A cold reply itself also lowers trust — using it here (rather than
+      // a warm one) keeps the break's own trust penalty from being masked by
+      // the triggering turn's own tone-driven trust gain, since both land in
+      // the same personalReplyAction call as the break check.
+      final trustBefore = rel.trust;
+      g.personalReplyAction('mama', _coldAction);
+      final interaction = rel.pendingInteractions.firstWhere((p) => p.subject == 'call Grandma');
+      expect(interaction.resolved, isTrue);
+      expect(interaction.broken, isTrue);
+      expect(rel.reliability, lessThan(reliabilityBefore));
+      expect(rel.trust, lessThan(trustBefore));
+    });
+
+    test('a promise not yet past its deadline is untouched by the break check', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      rel.pendingInteractions.add(PendingInteraction(
+        type: InteractionType.promise,
+        subject: 'call Grandma',
+        createdTurn: rel.turnCount,
+        deadlineTurn: rel.turnCount + 50,
+      ));
+      g.personalReplyAction('mama', _greetAction);
+      final interaction = rel.pendingInteractions.firstWhere((p) => p.subject == 'call Grandma');
+      expect(interaction.resolved, isFalse);
+      expect(interaction.broken, isFalse);
+    });
+
+    test('a pending question is never marked broken by the deadline check', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      rel.pendingInteractions.add(PendingInteraction(
+        type: InteractionType.question,
+        createdTurn: rel.turnCount,
+        deadlineTurn: 0,
+      ));
+      g.personalReplyAction('mama', _greetAction);
+      expect(rel.pendingInteractions.first.broken, isFalse);
+    });
+
+    test('fulfilling a promise before its deadline resolves it without breaking it', () {
+      final followedThrough = kPersonalReplyActions.firstWhere((a) => a.label == 'Followed through');
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      g.personalReplyAction('mama', _warmAction); // opens a promise with a fresh, far-off deadline
+      g.personalReplyAction('mama', followedThrough);
+      final resolved = rel.pendingInteractions.where((p) => p.type == InteractionType.promise).last;
+      expect(resolved.resolved, isTrue);
+      expect(resolved.broken, isFalse);
+    });
+
+    test('fulfillsPromise also resolves a pending request (e.g. a mama-initiated "promise me" ask), not just a self-made promise', () {
+      final followedThrough = kPersonalReplyActions.firstWhere((a) => a.label == 'Followed through');
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      rel.pendingInteractions.add(PendingInteraction(
+        type: InteractionType.request,
+        subject: 'call Grandma',
+        createdTurn: rel.turnCount,
+        deadlineTurn: rel.turnCount + 50,
+      ));
+      g.personalReplyAction('mama', followedThrough);
+      final request = rel.pendingInteractions.firstWhere((p) => p.subject == 'call Grandma');
+      expect(request.resolved, isTrue);
+      expect(request.broken, isFalse);
+    });
+
+    test('the mama openers pool includes a requestsPromise line asking her son to call his grandmother', () {
+      final line = kRelationshipContent['mama']!.openers.firstWhere(
+        (l) => l.requestsPromise,
+        orElse: () => throw StateError('no requestsPromise opener found'),
+      );
+      expect(line.subject, 'call Grandma');
+      expect(line.topic, Topic.family);
+    });
+  });
+
+  group('Memory tiers (Phase 11)', () {
+    test('a legacy free-text-derived turn (no ConversationIntent) is low importance', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      g.personalReplyAction('mama', _honestAction); // conversationIntent == null
+      expect(g.relationships['mama']!.recentConversation.last.importance, MemoryImportance.low);
+    });
+
+    test('pure social-lubricant intents (greet, thank, sayGoodbye, joke, sarcasm) are low importance', () {
+      const lowIntents = {
+        ConversationIntent.greet,
+        ConversationIntent.thank,
+        ConversationIntent.sayGoodbye,
+        ConversationIntent.joke,
+        ConversationIntent.sarcasm,
+      };
+      for (final intent in lowIntents) {
+        final g = CareerController();
+        addTearDown(g.dispose);
+        g.sendIntent('mama', intent);
+        expect(g.relationships['mama']!.recentConversation.last.importance, MemoryImportance.low, reason: '$intent');
+      }
+    });
+
+    test('conversational-continuity intents (checkIn, elaborate, deflect) are medium importance', () {
+      const mediumIntents = {ConversationIntent.checkIn, ConversationIntent.elaborate, ConversationIntent.deflect};
+      for (final intent in mediumIntents) {
+        final g = CareerController();
+        addTearDown(g.dispose);
+        g.sendIntent('mama', intent);
+        expect(g.relationships['mama']!.recentConversation.last.importance, MemoryImportance.medium, reason: '$intent');
+      }
+    });
+
+    test('a real-exchange intent (apologize, insult, askAboutFamily) is high importance', () {
+      const highIntents = {ConversationIntent.apologize, ConversationIntent.insult, ConversationIntent.askAboutFamily};
+      for (final intent in highIntents) {
+        final g = CareerController();
+        addTearDown(g.dispose);
+        g.sendIntent('mama', intent);
+        expect(g.relationships['mama']!.recentConversation.last.importance, MemoryImportance.high, reason: '$intent');
+      }
+    });
+
+    test('a milestone intent (confront, questionLoyalty, makePeace) is critical importance and is promoted to a permanent memory', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      g.devJumpToLevel(5); // unlocks makePeace/confront/questionLoyalty
+      final rel = g.relationships['mama']!;
+      g.sendIntent('mama', ConversationIntent.confront);
+      expect(rel.recentConversation.last.importance, MemoryImportance.critical);
+      expect(rel.memories.any((m) => m.kind == MemoryKind.deepConfession), isTrue);
+    });
+
+    test('asking for money is high importance (a real exchange, not idle chatter)', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      g.resolveMoneyAsk('mama', 50);
+      final rel = g.relationships['mama']!;
+      expect(rel.recentConversation.every((e) => e.importance == MemoryImportance.high), isTrue);
+    });
+
+    test('a medium-importance turn survives past kLowImportanceTurnWindow but ages out at kMediumImportanceTurnWindow', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      g.sendIntent('mama', ConversationIntent.checkIn); // turn 1, medium
+      for (var i = 0; i < CareerController.kMediumImportanceTurnWindow - 1; i++) {
+        g.sendIntent('mama', ConversationIntent.greet); // low-importance filler turns, advancing turnCount only
+      }
+      // Still within the medium window (age == kMediumImportanceTurnWindow - 1).
+      expect(rel.recentConversation.any((e) => e.turn == 1), isTrue);
+      g.sendIntent('mama', ConversationIntent.greet); // crosses kMediumImportanceTurnWindow
+      expect(rel.recentConversation.any((e) => e.turn == 1), isFalse);
+    });
+
+    test('a high-importance turn ages out after kHighImportanceDayWindow days, not turns', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      g.sendIntent('mama', ConversationIntent.apologize); // high importance
+      final createdDay = rel.recentConversation.last.day;
+
+      // Many turns pass same-day — a high-importance turn is day-granular,
+      // so turn count alone (even well past kLowImportanceTurnWindow/
+      // kMediumImportanceTurnWindow) never prunes it.
+      for (var i = 0; i < 20; i++) {
+        g.sendIntent('mama', ConversationIntent.greet);
+      }
+      expect(rel.recentConversation.any((e) => e.turn == 1), isTrue);
+
+      g.day += CareerController.kHighImportanceDayWindow;
+      g.sendIntent('mama', ConversationIntent.greet); // any new turn re-triggers the prune check
+      expect(rel.recentConversation.any((e) => e.day == createdDay && e.turn == 1), isFalse);
+    });
+  });
+
+  group('Precise callbacks (Phase 12)', () {
+    test('the elaborate/driving phrasing establishes coverJob AND sets topicSubject (previously latent — subject was never forwarded before)', () {
+      CareerController? found;
+      for (var trial = 0; trial < 100 && found == null; trial++) {
+        final g = CareerController();
+        g.sendIntent('mama', ConversationIntent.elaborate);
+        if (g.relationships['mama']!.facts['coverJob']?.value == 'driving') {
+          found = g;
+        } else {
+          g.dispose();
+        }
+      }
+      expect(found, isNotNull);
+      addTearDown(found!.dispose);
+      expect(found.relationships['mama']!.topicSubject, 'coverJob');
+    });
+
+    test('the "How\'s driving going" callback opener only fires once the fact, a recent matching event, and the live thread subject all line up', () {
+      const calloutText = "Driving all day, huh? Please tell me you're being careful out there.";
+      bool everFiresInOneTick({required bool withFact, required bool withEvent, required bool withSubject}) {
+        for (var trial = 0; trial < 200; trial++) {
+          final g = CareerController();
+          g.devJumpToLevel(4);
+          final rel = g.relationships['mama']!;
+          if (withFact) {
+            rel.facts['coverJob'] = ConversationFact(key: 'coverJob', value: 'driving', firstMentionedTurn: 1, lastConfirmedTurn: 1);
+          }
+          if (withEvent) {
+            rel.recentConversation.add(ConversationEvent(
+              tone: ReplyTone.honest, intensity: 0.5, fromMe: true, turn: 1, day: g.day, level: g.level, topic: Topic.plans,
+            ));
+          }
+          if (withSubject) {
+            rel.currentTopic = Topic.plans;
+            rel.topicSubject = 'coverJob';
+          }
+          _tick(g);
+          final fired = g.personalThreads['mama']!.any((m) => m.text == calloutText);
+          g.dispose();
+          if (fired) return true;
+        }
+        return false;
+      }
+
+      expect(everFiresInOneTick(withFact: true, withEvent: true, withSubject: true), isTrue);
+      expect(everFiresInOneTick(withFact: false, withEvent: true, withSubject: true), isFalse, reason: 'missing requiredFacts');
+      expect(everFiresInOneTick(withFact: true, withEvent: false, withSubject: true), isFalse, reason: 'missing requiredEventTopic');
+      expect(everFiresInOneTick(withFact: true, withEvent: true, withSubject: false), isFalse, reason: 'missing requiredSubject');
+    });
+  });
+
+  group('Character personality (Phase 15)', () {
+    test('each personal contact carries its own distinct CharacterPersonality, not the neutral default', () {
+      for (final p in kPersonalContacts) {
+        expect(p.personality, isNot(same(kNeutralPersonality)), reason: p.id);
+      }
+    });
+
+    test("Kiko (the funny best friend) has the highest humor on the roster", () {
+      final humors = {for (final p in kPersonalContacts) p.id: p.personality.humor};
+      expect(humors['friend'], greaterThan(humors['mama']!));
+      expect(humors['friend'], greaterThan(humors['oldfriend']!));
+      expect(humors['friend'], greaterThanOrEqualTo(humors.values.reduce((a, b) => a > b ? a : b)));
+    });
+
+    test("Mamá has the highest warmth on the roster", () {
+      final warmths = {for (final p in kPersonalContacts) p.id: p.personality.warmth};
+      expect(warmths['mama'], greaterThanOrEqualTo(warmths.values.reduce((a, b) => a > b ? a : b)));
+    });
+
+    test('sending mama a joke reaches an isJoke-tagged reaction line at least sometimes (personality threading did not break the joke pool)', () {
+      var sawJokeLine = false;
+      for (var trial = 0; trial < 100 && !sawJokeLine; trial++) {
+        final g = CareerController();
+        g.sendIntent('mama', ConversationIntent.joke);
+        final reply = g.personalThreads['mama']!.last.text;
+        if (kMamaIntentReactions[ConversationIntent.joke]![ReplyTone.warm]!.any((l) => l.isJoke && l.text == reply)) {
+          sawJokeLine = true;
+        }
+        g.dispose();
+      }
+      expect(sawJokeLine, isTrue);
+    });
+  });
+
+  group('Conversation depth (Phase 16)', () {
+    test('a fresh relationship starts at smallTalk', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      expect(g.relationships['mama']!.conversationDepth, ConversationDepth.smallTalk);
+    });
+
+    test('a moderate-intensity money reply deepens the conversation to personal', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final talkAboutMoney = kPersonalReplyActions.firstWhere((a) => a.label == 'Talk about money'); // Topic.money, intensity 0.6
+      g.personalReplyAction('mama', talkAboutMoney);
+      expect(g.relationships['mama']!.conversationDepth, ConversationDepth.personal);
+    });
+
+    test('a high-intensity, topic-tagged reply deepens the conversation to serious', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final apologizeForReal = kPersonalReplyActions.firstWhere((a) => a.label == 'Apologize for real'); // tagged topics, intensity 0.9
+      g.personalReplyAction('mama', apologizeForReal);
+      expect(g.relationships['mama']!.conversationDepth, ConversationDepth.serious);
+    });
+
+    test('isVulnerableDisclosure floors the conversation at vulnerable regardless of intensity', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final openUp = kPersonalReplyActions.firstWhere((a) => a.label == 'Open up'); // isVulnerableDisclosure: true, intensity only 0.6
+      g.personalReplyAction('mama', openUp);
+      expect(g.relationships['mama']!.conversationDepth, ConversationDepth.vulnerable);
+    });
+
+    test('depth de-escalates only one step per turn after a deep moment, not an instant reset', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      final rel = g.relationships['mama']!;
+      final openUp = kPersonalReplyActions.firstWhere((a) => a.label == 'Open up');
+      g.personalReplyAction('mama', openUp);
+      expect(rel.conversationDepth, ConversationDepth.vulnerable);
+      g.personalReplyAction('mama', _greetAction); // Topic.greeting -> classifies as smallTalk
+      expect(rel.conversationDepth, ConversationDepth.serious); // stepped down one level, not straight to smallTalk
+    });
+
+    test('the vulnerable-gated "glad you told me" reaction line is unreachable during ordinary wellbeing chatter, reachable once the conversation is actually vulnerable', () {
+      const gatedLine = "That's a heavy thing to carry. I'm glad you told me instead of hiding it.";
+      // Ordinary wellbeing chatter (classifies as casual) never surfaces it, however many trials.
+      for (var i = 0; i < 30; i++) {
+        final g = CareerController();
+        g.personalReplyAction('mama', _wellbeingAction);
+        expect(g.personalThreads['mama']!.last.text, isNot(gatedLine), reason: 'trial $i');
+        g.dispose();
+      }
+      // Once the conversation is actually vulnerable, it's reachable — one
+      // candidate among several wellbeing-tagged honest reactions, so retry.
+      var sawGatedLine = false;
+      final openUp = kPersonalReplyActions.firstWhere((a) => a.label == 'Open up');
+      for (var i = 0; i < 200 && !sawGatedLine; i++) {
+        final g = CareerController();
+        g.personalReplyAction('mama', openUp);
+        if (g.personalThreads['mama']!.last.text == gatedLine) sawGatedLine = true;
+        g.dispose();
+      }
+      expect(sawGatedLine, isTrue);
+    });
+  });
+
   group('Response Planner (Phase 5)', () {
     test('lastResponsePlan is populated after a reply', () {
       final g = CareerController();
@@ -975,7 +1639,7 @@ void main() {
       // never tagged this way, so this constructs one directly instead.
       const confrontAction = PersonalReplyAction(
         'Confront',
-        "Something's not adding up. Explain it.",
+        phrasings: [DialogueLine("Something's not adding up. Explain it.")],
         tone: ReplyTone.cold,
         topics: {Topic.suspicion},
         intent: Intent.statement,
@@ -1119,14 +1783,14 @@ void main() {
       // of the mechanism itself.
       const drivingAction = PersonalReplyAction(
         'Cover story A',
-        "It's driving.",
+        phrasings: [DialogueLine("It's driving.")],
         tone: ReplyTone.honest,
         intent: Intent.statement,
         establishesFacts: {'coverJob': 'driving'},
       );
       const restaurantAction = PersonalReplyAction(
         'Cover story B',
-        "Actually it's a restaurant now.",
+        phrasings: [DialogueLine("Actually it's a restaurant now.")],
         tone: ReplyTone.honest,
         intent: Intent.statement,
         establishesFacts: {'coverJob': 'restaurant'},
