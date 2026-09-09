@@ -8,6 +8,20 @@ enum ReplyTone { warm, honest, vague, cold, excuse }
 /// What the player's free text is trying to DO, independent of its tone.
 enum Intent { question, promise, confession, dismissal, statement }
 
+/// The DELIVERY register a specific phrasing is written in — distinct from
+/// [ReplyTone] (the line's emotional valence, e.g. warm vs. cold) and from
+/// [ConversationIntent]/[Intent] (WHAT the player is trying to do or say):
+/// this is HOW it's said. The same [ConversationIntent.checkIn] can be sent
+/// as "Hey mama, how you doing?" ([warm]), "What's up ma?" ([casual]), or
+/// "You alive over there? 😂" ([funny]) — three phrasings of the identical
+/// player action, not three different actions. Optional on [DialogueLine]
+/// (`null` — most existing content — is simply unstyled, same as every
+/// other line ever authored before this existed); read by [styleMatch] to
+/// let [CharacterPersonality] bias which flavor of phrasing gets reached
+/// for, the same way [humorMatch]/[warmthMatch]/[curiosityMatch]/
+/// [patienceMatch] already bias other axes.
+enum DialogueStyle { warm, casual, funny, short, affectionate, serious, playful }
+
 /// Grows by adding cases — no engine change needed to add a new milestone kind.
 enum MemoryKind {
   firstWarmReply,
@@ -16,6 +30,7 @@ enum MemoryKind {
   heardAboutConfrontation,
   promiseMade, // [ConversationIntent.makePeace] resolved warmly — a commitment worth remembering past the short-term window
   deepConfession, // [ConversationIntent.confront]/[ConversationIntent.questionLoyalty] fired — a charged exchange, not small talk
+  brokenPromise, // a promise/request's deadline passed unresolved — see [isOverdue]/`CareerController._breakOverdueInteractions` (Phase 10)
 }
 
 /// What the player is trying to communicate, independent of the exact words
@@ -68,6 +83,155 @@ enum ConversationIntent {
   /// so tapping "Explain More" always actually explains, and declining is a
   /// separate, explicit choice.
   deflect,
+  // ── Phase 2 (see reply_tray.dart's `_storyContextChips`) ────────────────
+  // Migrating the highest-specificity story-event chips off the generic
+  // (tone, topic) pool onto their own isolated reaction pool each — see
+  // `content/mama_reactions.dart`'s matching entries. These chips describe
+  // one exact narrative beat ("I paid someone off today"), so pooling them
+  // with dozens of unrelated same-topic/same-tone lines is exactly the
+  // collision risk `intentMatch`/isolated `kMamaIntentReactions` buckets
+  // exist to avoid (see the "Okay fine, I've been a little stressed"/
+  // "Whatever's got you worried" bugs this was written to stop repeating).
+  // `topic`/`tone` stay on each chip as secondary filters — pickLine still
+  // reads them — but `intent` is what actually selects the reaction pool now.
+  /// "Paid someone off" / "Had to grease someone" — the `recentStoryEvent ==
+  /// 'bribed'` chips.
+  admitBribe,
+  /// "Close call" / "Shook up" / "Too close" — `recentStoryEvent ==
+  /// 'close_call'`.
+  reportCloseCall,
+  /// "Something went right" / "Getting it done" / "Getting the hang of it"
+  /// — `recentStoryEvent == 'run_success'`.
+  reportSuccess,
+  /// "Crossed a line" / "Not proud of it" / "Had to do it" —
+  /// `recentStoryEvent == 'crossed_line'`.
+  admitCrossedLine,
+  /// "Had to get rough" / "Ugly situation" / "People push you" —
+  /// `recentStoryEvent == 'crew_violence'`.
+  admitViolence,
+  /// "Someone pushed back" / "People are difficult" — `recentStoryEvent ==
+  /// 'refused'`.
+  reportPushback,
+  /// "Team drama" / "Managing people" / "Trust issues" — `recentStoryEvent
+  /// == 'crew_trouble'`.
+  reportCrewTrouble,
+  /// "Things are tense" / "People testing me" — `recentStoryEvent ==
+  /// 'incursion'`.
+  reportIncursion,
+  /// "Messed up at work" / "Slipped up" — the level-1 `strikes > 0` chips;
+  /// the flagship example this phase was built around.
+  admitMistake,
+  // ── Phase 3 — the rest of `_storyContextChips`'s clusters and the legacy
+  // `kPersonalReplyActions` catalog (data.dart). Same rationale as Phase 2's
+  // batch above; grouped one intent per CLUSTER (every chip in an `if`/
+  // `case` block sharing one id, same as Phase 2), not one per literal
+  // chip — several are reused directly by an existing intent above instead
+  // of getting a new one here, wherever the register already matches (see
+  // each PersonalReplyAction call site's own comment for which).
+  /// "Can't sleep" / "Night thoughts" / "Wide awake" — the `TimeOfDay.night` cluster.
+  reportCantSleep,
+  /// "Big day ahead" / "Up early" — the `TimeOfDay.morning`, level>=2 cluster.
+  reportBigDayAhead,
+  /// "Long day" / "Finally breathing" / "Day done" — the `TimeOfDay.evening`
+  /// cluster; also reused by "Slow day"/"Today was a lot" (section 8).
+  reportLongDay,
+  /// "Broke" / "Struggling financially" / "Debt stress" — the `cash < 300` cluster.
+  reportBroke,
+  /// "Doing well" / "Good stretch" / "Good week" — the `cash > 50000`/`cash >
+  /// 8000` clusters; also reused by "Best month yet" (level 4).
+  reportDoingWell,
+  /// "Need to be careful" / "Heat is on" — the `policeHeat > 75` cluster;
+  /// also reused by the level 5-7 `investigationStage > 0` cluster ("Under a
+  /// microscope"/"Heat is serious"/"Got to lay low") — same "serious heat"
+  /// register at two different story points.
+  reportHeatHigh,
+  /// "Watched" / "Something feels off" / "Eyes on me" — the `policeHeat > 50` cluster.
+  reportFeelingWatched,
+  /// "Know I messed up" / "Been distant" / "Trying to do better" — the
+  /// `rel.mood < -20` cluster.
+  admitPullingAway,
+  /// "Been MIA" / "Sorry been quiet" / "Checked out for a bit" — the
+  /// `rel.daysSinceReply > 2` cluster. Distinct from [admitPullingAway]: a
+  /// timing lapse reads differently from an emotional one, even though both
+  /// are apologetic.
+  apologizeForGoingQuiet,
+  /// "Work going okay" — level 1, `cleanWeeks >= 1`.
+  reportWorkGoingOkay,
+  /// "New job" — level 1, always shown.
+  reportNewJob,
+  /// "In the middle of something" / "Kind of tense right now" — level 2, `runStage != null`.
+  tooBusyRightNow,
+  /// "Long drives" / "Checkpoints" — level 2, always shown.
+  reportJobRoutine,
+  /// "Difficult people" / "Not everyone cooperates" — level 3, a refused/lost target.
+  reportDifficultPeople,
+  /// "Different stress" / "Going door to door" — level 3, always shown.
+  reportFieldWorkStress,
+  /// "Managing people" / "In charge now" — level 4, always shown.
+  reportNewResponsibility,
+  /// "In deep" / "Hard to separate" — level 5-7, always shown.
+  admitInOverHead,
+  /// "People around me" — level 5-7; also reused by "The people I'm around"
+  /// (level 4 guilt/reflection) — same underlying disclosure at two levels.
+  reportNewCrowd,
+  /// "Reflecting" / "Who am I becoming" — level 4 guilt/reflection.
+  admitSelfDoubt,
+  /// "Worth it?" / "Point of no return" / "Carrying a lot" — level 5 guilt/reflection.
+  admitDeepDoubt,
+  /// "Just missed you" / "No reason" / "Had you on my mind" — the always-
+  /// available deflection cluster's no-real-reason opener.
+  reachOutNoReason,
+  // ── Phase 3 — kPersonalReplyActions (data.dart's legacy catalog) ────────
+  // NOTE: the generic, high-traffic entries (Greet, Reassure, Be honest, Ask
+  // how they are, Ask about family, Push for answers, Stay vague, Make an
+  // excuse, Brush off, Insult, Talk/Deflect about money, Check in)
+  // deliberately have NO intent here and were never given one — see the
+  // long comment at the top of kPersonalReplyActions (data.dart) for why:
+  // isolating them would cut them off from the engine's cross-cutting
+  // reactive machinery (dodge/toneShift/answeredQuestion acknowledgment,
+  // requiredFacts, honesty/reliability gating, the questionId bespoke-tray
+  // system) that lives only in the generic pool — confirmed by several
+  // engine tests once tried. Only the mama-specific, narrower/level-gated
+  // entries below got one.
+  /// "Followed through" — the player reporting they kept a promise
+  /// ([DialogueLine.fulfillsPromise]).
+  reportFollowedThrough,
+  /// "Make it right" — a repair move, only offered once mood's already low.
+  makeItRight,
+  /// "Tell her about your day" — an early-game, low-stakes daily update.
+  tellAboutDay,
+  /// "Share something good" — an early-game unprompted good-news share.
+  shareGoodNews,
+  /// "Change the subject" — actively redirecting onto Mama, distinct from
+  /// [deflect] (declining to elaborate at all): this one still engages, just
+  /// not on the original topic.
+  changeSubject,
+  /// "Deny everything" — flatly denying a suspicion once it's already high.
+  denyEverything,
+  /// "Come clean (a little)" — a partial, hedged admission.
+  comeCleanPartially,
+  /// "Open up" — a real, vulnerable disclosure ([DialogueLine.isVulnerableDisclosure]).
+  openUp,
+  /// "Keep her at a distance" — deliberately withholding to protect her.
+  keepDistance,
+  /// "Tell her you miss her" — late-game homesickness/longing.
+  missHer,
+  // ── Item 11: action chains ───────────────────────────────────────────
+  // A [DialogueLine.questionId]-tagged Mama line can itself be answered by a
+  // [kQuestionAnswerChips] chip whose OWN Mama-reply line carries a further
+  // questionId — the tray-swap mechanism (items 2/6/7) already supports
+  // this with no engine change; chaining is purely a content pattern. These
+  // two are the "Ask About Uncle" worked example: narrow, one-off, chain-
+  // specific replies, isolated the same way Phase 2's story-event chips
+  // were (not generic/high-traffic — see the big NOTE a few entries up for
+  // why THAT distinction matters).
+  /// "Ask About Uncle" — reached from the `mama_uncle_back` bespoke tray.
+  askAboutUncle,
+  /// "Ask How Mama Is Doing" — reached from the `mama_uncle_stubborn`
+  /// bespoke tray; its own reply converges the chain back into the
+  /// EXISTING `mama_wellbeing_checkin` bespoke tray (item 2) rather than
+  /// opening a new leaf — chains can merge, not just branch.
+  askIfMamaIsOkay,
 }
 
 /// How far into the current story level the conversation is sitting, derived
@@ -79,9 +243,34 @@ enum ConversationIntent {
 enum LevelPhase { opening, early, mid, late, cusp }
 
 /// How long a [ConversationEvent] stays in [DialogueContext.recentConversation]
-/// before it's pruned — see `RelationshipState.recentConversation` for the
-/// eviction rule. Small talk shouldn't linger; a betrayal should.
-enum MemoryImportance { low, medium, high }
+/// before it's pruned — see `CareerController._pruneConversationMemory` for
+/// the eviction rule this actually drives (Phase 11): [low] survives ~3
+/// turns, [medium] ~10 turns, [high] several days, [critical] permanently.
+/// "lol" ([low]) shouldn't sit in the same window competing for space
+/// against "I'm thinking about leaving the family" ([high]/[critical]) —
+/// this is the axis that keeps them from doing that.
+///
+/// This is the "Recent" layer of the game's four-tier memory model, the
+/// other three being existing structures rather than new ones:
+/// - **Immediate** — this turn only, never persisted: [DialogueContext]
+///   itself (`mood`, `recentTones.last`, `currentTopic`, `playerIntent`, …),
+///   read once by [pickLine] and gone.
+/// - **Recent** — [ConversationEvent] in `RelationshipState.recentConversation`,
+///   this enum's own scope. A *kind* of thing was said ("askedAboutFamily,
+///   tagged suspicion"), not its specific content, and it fades on the
+///   schedule below.
+/// - **Long-term** — [MemoryEvent]/[MemoryKind] in `RelationshipState.memories`
+///   (milestones — see [recordMemory]/[memoryWeight]) and [ConversationFact]
+///   in `RelationshipState.facts` (specific durable content, e.g. "brother's
+///   name is Marcus" — see [recordFact]). Both survive past whatever prunes
+///   [recentConversation]; a [critical]-importance turn is how one gets
+///   promoted here (see `CareerController._permanentMemoryFor`).
+/// - **Relationship** — the accumulated net effect, not a discrete memory of
+///   any one thing: `RelationshipState`'s own stat fields (closeness, trust,
+///   suspicion, mood, honesty, reliability, …). Nothing here ever points
+///   back to which turn caused it; it's what she feels now, not what she
+///   remembers happening.
+enum MemoryImportance { low, medium, high, critical }
 
 /// One turn of personal-thread conversation, kept in a short rolling window
 /// (`RelationshipState.recentConversation`) so a reply can reference what was
@@ -195,10 +384,24 @@ enum InteractionType { question, request, promise }
 /// specifically" — e.g. `type: question, topic: family, subject: 'Marcus'`
 /// for "Did you talk to Marcus?" — so a later reply can eventually be
 /// evaluated against what's actually still open, not just whether *a*
-/// question of *some* kind is pending. [deadlineTurn] is optional and
-/// currently informational only — nothing yet auto-expires an interaction
-/// once its deadline passes; a caller that wants that behavior checks
-/// [RelationshipState.turnCount] against it.
+/// question of *some* kind is pending. [deadlineTurn] is compared against
+/// [RelationshipState.turnCount] by [isOverdue] — see [CareerController]'s
+/// `_breakOverdueInteractions` (Phase 10) for the caller that actually acts
+/// on it, checked at the top of every reply to this contact (turnCount is
+/// the only clock a deadline this shape can be compared against — nothing
+/// advances it on a passive day/tick, so an overdue promise surfaces the
+/// next time the player actually talks to them, not silently in the
+/// background).
+///
+/// [broken] distinguishes HOW a resolved interaction was closed: [resolved]
+/// alone only means "addressed" (see above — even a refused request
+/// resolves), so a promise/request that lapsed past its deadline needs its
+/// own flag to read as a failure rather than a success. Only meaningful once
+/// [resolved] is true; a still-pending interaction is neither kept nor
+/// broken yet. Not set for [InteractionType.question] — a dodged question
+/// already has [RelationshipState.consecutiveDodgeCount]/
+/// [nudgeSuspicionFromDodgePattern] as its own consequence path, and
+/// "broken" reads oddly for a question anyway (nothing was promised).
 ///
 /// This only tracks state — nothing in [pickLine]/[DialogueLine.isEligible]
 /// reads it yet, the same disclosed gap as [RelationshipState.topicUnresolved]
@@ -211,6 +414,7 @@ class PendingInteraction {
   final int createdTurn;
   final int? deadlineTurn;
   bool resolved;
+  bool broken;
   PendingInteraction({
     required this.type,
     this.topic,
@@ -218,8 +422,34 @@ class PendingInteraction {
     required this.createdTurn,
     this.deadlineTurn,
     this.resolved = false,
+    this.broken = false,
   });
 }
+
+/// True once [interaction]'s [PendingInteraction.deadlineTurn] has passed
+/// without it being resolved — the trigger [CareerController].
+/// `_breakOverdueInteractions` acts on. Pure predicate (no mutation), so it's
+/// testable on its own rather than only through the controller's tick. An
+/// interaction with no deadline, or one already resolved (kept, refused, or
+/// previously broken), is never overdue — a strict `>` (not `>=`) so an
+/// interaction is still on time on the turn its deadline actually falls on,
+/// matching [PendingInteraction.deadlineTurn]'s doc comment ("the caller
+/// checks turnCount against it").
+bool isOverdue(PendingInteraction interaction, int currentTurn) {
+  if (interaction.resolved) return false;
+  final deadline = interaction.deadlineTurn;
+  return deadline != null && currentTurn > deadline;
+}
+
+/// Default grace window (in [RelationshipState.turnCount] turns) a
+/// promise/request gets before [isOverdue] considers it broken, for any
+/// caller that doesn't specify its own (see [DialogueLine.promiseDeadlineTurns]
+/// and `CareerController.personalReplyAction`'s player-initiated promise
+/// path). Generous rather than tight — most promise-tagged content (e.g.
+/// "Reassure") is a vague commitment, not a same-conversation task, so a
+/// short window would make ordinary conversational pacing read as broken
+/// promises.
+const int kDefaultPromiseDeadlineTurns = 8;
 
 /// A specific, keyed piece of information Mama actually knows about the
 /// player — deliberately separate from [ConversationEvent]/
@@ -677,6 +907,52 @@ ResponsePlan planResponse({
 
 // ── Line selection ──────────────────────────────────────────────────────
 
+/// A character's stable behavioral profile (Phase 15) — biases WHICH lines
+/// [pickLine] reaches for, not a parallel dialogue engine per character. Each
+/// axis feeds its own small multiplier into [_finalWeight] (see
+/// [humorMatch]/[curiosityMatch]/[warmthMatch]/[patienceMatch]) the exact
+/// same way [toneMatch]/[topicMatch] already do — "your existing weight and
+/// _finalWeight() architecture is perfect for this" was the brief, so this
+/// adds terms to that one formula rather than branching content per contact.
+///
+/// Every axis is 0-100, 50 = neutral (no bias either way), matching the
+/// convention [RelationshipState.honesty]/[reliability]/[responsiveness]
+/// already established for "a trait being measured" rather than an
+/// absence-based 0 default.
+///
+/// Distinct from `PersonalContact`'s existing `personalityWarmth`/
+/// `emotionalVolatility` (data.dart), which drive MOOD DYNAMICS
+/// ([baselineAttraction]/[personalityModifier]) — [warmth] here drives LINE
+/// SELECTION instead. A character can drift toward a warm mood baseline
+/// without that same warmth making a comforting LINE more likely to be
+/// picked, which is why this is its own axis rather than double-booking
+/// `personalityWarmth`.
+///
+/// [strictness]/[sarcasm]/[directness]/[talkativeness] are carried but not
+/// yet wired into a multiplier — no concrete selection rule was specified
+/// for them yet, the same disclosed-not-invented gap Phase 9's own doc
+/// comment models (see `nudgeHonesty`'s doc comment).
+class CharacterPersonality {
+  final double warmth, humor, patience, curiosity, strictness, sarcasm, directness, talkativeness;
+  const CharacterPersonality({
+    this.warmth = 50,
+    this.humor = 50,
+    this.patience = 50,
+    this.curiosity = 50,
+    this.strictness = 50,
+    this.sarcasm = 50,
+    this.directness = 50,
+    this.talkativeness = 50,
+  });
+}
+
+/// Every axis at 50 — the default for a contact with no authored
+/// [CharacterPersonality], and for a [DialogueContext] built before this
+/// field existed. Every [_finalWeight] personality multiplier evaluates to
+/// exactly 1.0 (no-op) against this, so nothing already-shipped is affected
+/// by its absence.
+const kNeutralPersonality = CharacterPersonality();
+
 /// Everything a [DialogueLine.when] predicate (or declarative gate) might
 /// need to decide eligibility.
 class DialogueContext {
@@ -688,6 +964,13 @@ class DialogueContext {
   final bool isWeekend;
   final Topic? currentTopic; // the topic this conversation thread is presently on — see advanceTopic()
   final int topicProgress; // turns spent on currentTopic; 0 when there's no active thread
+  /// Finer-grained "what specifically" within [currentTopic] — mirrors
+  /// `RelationshipState.topicSubject` (see its own doc comment). Read by
+  /// [DialogueLine.isEligible] for [DialogueLine.requiredSubject] (Phase 12).
+  /// Absent from every call site written before that gate existed — `null`
+  /// there is indistinguishable from "no subject is currently live," which is
+  /// the correct read for a caller that was never in a position to have one.
+  final String? topicSubject;
   final Set<Topic> playerTopics; // topics detected in the player's current message, if any
   final Intent? playerIntent; // the current message's intent, if any (e.g. Intent.question)
   final bool questionJustDodged; // true for exactly the turn where the player dismissed a pending question
@@ -725,6 +1008,18 @@ class DialogueContext {
   /// measured, the same convention trust/closeness already use, unlike
   /// suspicion/fear/respect/debt's absence-based 0 default.
   final double honesty, reliability, responsiveness;
+  /// This contact's stable behavioral profile (Phase 15) — see
+  /// [CharacterPersonality]'s own doc comment. Defaults to
+  /// [kNeutralPersonality] (every axis 50), under which every personality
+  /// multiplier in [_finalWeight] is a no-op — existing call sites that
+  /// don't pass this see no behavior change.
+  final CharacterPersonality personality;
+  /// How emotionally deep the conversation is running right now (Phase 16) —
+  /// see [ConversationDepth]'s own doc comment. Defaults to
+  /// [ConversationDepth.smallTalk], matching `RelationshipState.
+  /// conversationDepth`'s own starting value for a thread that hasn't said
+  /// anything yet.
+  final ConversationDepth conversationDepth;
   const DialogueContext({
     required this.mood,
     required this.closeness,
@@ -740,6 +1035,7 @@ class DialogueContext {
     this.isWeekend = false,
     this.currentTopic,
     this.topicProgress = 0,
+    this.topicSubject,
     this.playerTopics = const {},
     this.playerIntent,
     this.questionJustDodged = false,
@@ -750,6 +1046,8 @@ class DialogueContext {
     this.levelPhase,
     this.recentConversation = const [],
     this.facts = const {},
+    this.personality = kNeutralPersonality,
+    this.conversationDepth = ConversationDepth.smallTalk,
   });
 
   bool hasMemory(MemoryKind k) => memories.any((m) => m.kind == k);
@@ -783,10 +1081,38 @@ class DialogueLine {
   final Set<MemoryKind>? anyRequiredMemories;
   final Set<MemoryKind>? forbiddenMemories;
   final ReplyTone? tone; // this line's own emotional register, used by ToneMatch
+  /// This line IS a joke/playful aside — read by [humorMatch] (Phase 15) to
+  /// boost it for a high-[CharacterPersonality.humor] character. No existing
+  /// tag ([tone]/[intent]/[topic]) captures "this specific line is playful"
+  /// on its own, so this is a new, narrow, single-purpose flag rather than
+  /// overloading one of those — the same reasoning [requestsPromise] (Phase
+  /// 10) and [acknowledgesDodge] (Phase 3) were each added for their own
+  /// single purpose instead of folding into a broader existing field.
+  final bool isJoke;
+  /// This line/phrasing IS a raw, first-time disclosure — e.g. "I haven't
+  /// told anyone this." Read by [classifyDepth] (Phase 16), the same
+  /// single-purpose-flag reasoning as [isJoke]: not derivable from
+  /// [topic]/[tone]/an intensity value the way the other [ConversationDepth]
+  /// tiers are, so content that means it says so directly. Forwarded from a
+  /// chosen [DialogueLine] to the synthesized [PersonalReplyAction] the same
+  /// way [subject]/[fulfillsPromise] already are (see `CareerController.
+  /// sendIntent`) — the actual classification reads
+  /// [PersonalReplyAction.isVulnerableDisclosure], this is a legacy pool's
+  /// self-initiated equivalent to declare it too.
+  final bool isVulnerableDisclosure;
   final Set<TimeOfDay>? timesOfDay; // null = any time of day
   final bool? requireWeekend; // null = no constraint; true = weekend only; false = weekday only
   final Intent? intent; // the player intent this line is meant to address, used by intentMatch
   final int? progressionMin, progressionMax; // gates a line to a stage of the [topic] thread — see advanceTopic()
+  /// Gates this line to a range of [DialogueContext.conversationDepth]
+  /// (Phase 16) — same shape as [progressionMin]/[progressionMax], just
+  /// against [ConversationDepth.index] instead of [topicProgress]. The
+  /// stated purpose: a raw, [ConversationDepth.vulnerable]-gated response
+  /// (`minDepth: ConversationDepth.vulnerable`) can't surface during
+  /// ordinary small talk, and a light aside (`maxDepth:
+  /// ConversationDepth.casual`) can't surface once things have turned
+  /// serious.
+  final ConversationDepth? minDepth, maxDepth;
   final bool acknowledgesDodge; // fits a reply to a just-dismissed pending question, used by dodgeMatch
   final bool acknowledgesToneShift; // fits a reply that notices the player's tone just changed, used by toneShiftMatch
   /// Fits a reply that specifically notices a pending question just got a
@@ -839,6 +1165,79 @@ class DialogueLine {
   /// the only half of reliability tracking Phase 9 wires; a promise going
   /// unresolved past some deadline (the "broken" half) stays unbuilt.
   final bool fulfillsPromise;
+  /// True if this line asks the player to commit to something concrete —
+  /// e.g. "Promise me you'll call your grandma." (Phase 10). Opens an
+  /// [InteractionType.request] [PendingInteraction] (see
+  /// `CareerController.personalReplyAction`/`_tickPersonalRelationships`,
+  /// the same two spots that already open one for [Intent.question]), using
+  /// [subject]/[topic] as what's being asked for. [PersonalReplyAction.
+  /// fulfillsPromise] resolves it the same way it resolves a player-made
+  /// promise — from the player's side, following through on what Mama asked
+  /// for and following through on what they themselves promised read as the
+  /// same act, so one flag closes either.
+  final bool requestsPromise;
+  /// Overrides [kDefaultPromiseDeadlineTurns] for this specific request —
+  /// null (the default) uses the shared default. Only meaningful alongside
+  /// [requestsPromise].
+  final int? promiseDeadlineTurns;
+  /// Hard-gates this line to [DialogueContext.recentConversation] (Phase
+  /// 12): eligible only when some turn in that window carries this [Topic].
+  /// The [requiresRecentIntent] callback mechanism already answers "did the
+  /// player recently do X" by [ConversationIntent]; this answers "was this
+  /// SUBJECT MATTER recently on the table at all" by [Topic] instead —
+  /// coarser than an intent match, but usable by content that doesn't care
+  /// which specific intent raised it, only that it did. Not turn-windowed
+  /// the way [recallWithinTurns] bounds [requiresRecentIntent] — Phase 11's
+  /// own importance-tiered pruning already keeps [recentConversation]
+  /// relevance-bounded (a family-topic turn ages out on its own schedule),
+  /// so a second window here would just be redundant tuning of the same
+  /// knob from a different angle. A hard gate, not a soft recallMatch boost
+  /// like [requiresRecentIntent]: paired with [requiredFacts] (see its own
+  /// doc comment's `{'brotherName': 'Marcus'}` example), a line that NAMES
+  /// something specific is wrong to fire at all if the setup was never
+  /// there, not just less likely to.
+  final Topic? requiredEventTopic;
+  /// Hard-gates this line to [DialogueContext.topicSubject] (Phase 12):
+  /// eligible only when the conversation thread is CURRENTLY, right now, on
+  /// this exact subject — e.g. `'brother'` for a callback that only makes
+  /// sense while the brother subthread specifically is live, not just
+  /// [Topic.family] in general. Distinct from [requiredEventTopic] the same
+  /// way [DialogueContext.topicSubject] is distinct from
+  /// [DialogueContext.recentConversation]: this reads the live thread's
+  /// present state, not conversation history — see
+  /// `RelationshipState.topicSubject`'s own doc comment for why a bare
+  /// [Topic] can't tell "the brother" apart from "the aunt" within
+  /// [Topic.family] on its own.
+  final String? requiredSubject;
+  /// Identifies WHICH specific thing Mama just said — e.g.
+  /// `'mama_wellbeing_checkin'` for every phrasing of "how are you / how was
+  /// your day," `'mama_suspicion_distant'` for every phrasing of "something
+  /// feels off with you," `'mama_brother_distant'` for "you haven't called
+  /// your brother, everything okay?" Several differently-worded lines can
+  /// (and should) share the same id when they're getting at the same
+  /// underlying thing — this identifies what was RAISED, not the exact
+  /// sentence, and despite the name isn't limited to lines tagged
+  /// [Intent.question]: a loaded STATEMENT deserves a tray built around what
+  /// was actually said just as much as a literal question does (`intent`
+  /// only additionally decides whether it also opens a dodge-tracked
+  /// `PendingInteraction` — see `CareerController`'s two call sites, which
+  /// set `RelationshipState.pendingQuestionId` off this field unconditionally
+  /// but only flip `lastQuestionAnswered`/open the interaction when `intent
+  /// == Intent.question`). `conversation/reply_tray.dart`'s
+  /// `personalReplyOptions` reads `pendingQuestionId` to look up
+  /// `kQuestionAnswerChips` (conversation/intents.dart) — a bespoke set of
+  /// reply chips for exactly what was raised, replacing the generic
+  /// Explain-More/Not-Right-Now tray for the turn (this is the tray
+  /// responding to Mama's exact last line + thread + relationship state,
+  /// not just `currentTopic`). `null` (every line with no dedicated chips
+  /// authored) falls back to that generic tray exactly as before this field
+  /// existed.
+  final String? questionId;
+  /// This phrasing's delivery register — see [DialogueStyle]'s own doc
+  /// comment. `null` (every line authored before this field existed, and
+  /// most content going forward) means unstyled, exactly as before: neutral
+  /// under [styleMatch], no behavior change.
+  final DialogueStyle? style;
   const DialogueLine(
     this.text, {
     this.when = _alwaysTrue,
@@ -878,6 +1277,16 @@ class DialogueLine {
     this.requiredFacts,
     this.establishesFacts,
     this.fulfillsPromise = false,
+    this.requestsPromise = false,
+    this.promiseDeadlineTurns,
+    this.requiredEventTopic,
+    this.requiredSubject,
+    this.isJoke = false,
+    this.isVulnerableDisclosure = false,
+    this.minDepth,
+    this.maxDepth,
+    this.questionId,
+    this.style,
   });
   static bool _alwaysTrue(DialogueContext ctx) => true;
 
@@ -903,12 +1312,16 @@ class DialogueLine {
     if (requireWeekend != null && requireWeekend != ctx.isWeekend) return false;
     if (progressionMin != null && ctx.topicProgress < progressionMin!) return false;
     if (progressionMax != null && ctx.topicProgress > progressionMax!) return false;
+    if (minDepth != null && ctx.conversationDepth.index < minDepth!.index) return false;
+    if (maxDepth != null && ctx.conversationDepth.index > maxDepth!.index) return false;
     if (phases != null && ctx.levelPhase != null && !phases!.contains(ctx.levelPhase)) return false;
     if (requiredFacts != null) {
       for (final entry in requiredFacts!.entries) {
         if (ctx.facts[entry.key]?.value != entry.value) return false;
       }
     }
+    if (requiredEventTopic != null && !ctx.recentConversation.any((e) => e.topic == requiredEventTopic)) return false;
+    if (requiredSubject != null && ctx.topicSubject != requiredSubject) return false;
     return true;
   }
 }
@@ -968,6 +1381,79 @@ double topicMatch(Topic? lineTopic, Topic? currentTopic, Set<Topic> playerTopics
 double intentMatch(Intent? lineIntent, Intent? playerIntent) {
   if (lineIntent == null || playerIntent == null) return 1.0;
   return lineIntent == playerIntent ? 5.0 : 0.3;
+}
+
+// ── Character personality (Phase 15) ────────────────────────────────────
+// Each function below is [CharacterPersonality]'s own doc comment's promise
+// made concrete: one trait, one line property, one multiplier, folded into
+// _finalWeight the same way toneMatch/topicMatch/intentMatch already are.
+// All four share the same linear scale — trait 0 -> 0.5x, 50 (neutral) ->
+// 1.0x (a no-op, so an unset/neutral CharacterPersonality changes nothing),
+// 100 -> 1.5x — the same shape personalityModifier() already uses for
+// emotionalVolatility, just over a 0-100 axis instead of 0-1.
+double _traitScale(double trait) => 0.5 + trait.clamp(0, 100) / 100;
+
+/// High [humor] boosts a [DialogueLine.isJoke] line; neutral (1.0) for
+/// everything else regardless of how funny the character is — humor doesn't
+/// make a NON-joke line more likely, it just makes reaching for the joke
+/// line, when one's eligible, more likely.
+double humorMatch(bool lineIsJoke, double humor) => lineIsJoke ? _traitScale(humor) : 1.0;
+
+/// High [curiosity] boosts a line tagged [Intent.question] — a naturally
+/// curious character reaches for a question over a statement more often.
+/// Independent of [intentMatch] (which matches a line's intent against the
+/// PLAYER's, for answering what they just said); this is about the
+/// character's own tendency to ask, regardless of what's being replied to.
+double curiosityMatch(Intent? lineIntent, double curiosity) => lineIntent == Intent.question ? _traitScale(curiosity) : 1.0;
+
+/// High [warmth] boosts a [ReplyTone.warm]-tagged line — a comforting reply
+/// reads as more natural for a warm character. Distinct from
+/// `PersonalContact.personalityWarmth` (see [CharacterPersonality]'s own doc
+/// comment): that shifts where MOOD settles at rest; this shifts which LINE
+/// gets picked.
+double warmthMatch(ReplyTone? lineTone, double warmth) => lineTone == ReplyTone.warm ? _traitScale(warmth) : 1.0;
+
+/// Low [patience] boosts a [ReplyTone.cold]-tagged line once the player has
+/// actually repeated themselves ([consecutiveActionCount] >= 2 — the same
+/// "not a single-turn signal" restraint [nudgeHonesty]/
+/// [nudgeSuspicionFromDodgePattern] already apply to their own patterns, so
+/// asking something once doesn't read as "the player keeps asking"). Uses
+/// [_traitScale] on `100 - patience` so a patient character (high patience)
+/// suppresses the irritated line instead of boosting it, and an impatient
+/// one (low patience) boosts it — the inversion is the whole point: this
+/// models a trait running out, not a trait being expressed directly the way
+/// [humorMatch]/[curiosityMatch]/[warmthMatch] each do.
+double patienceMatch(ReplyTone? lineTone, double patience, int consecutiveActionCount) {
+  if (lineTone != ReplyTone.cold || consecutiveActionCount < 2) return 1.0;
+  return _traitScale(100 - patience);
+}
+
+/// [DialogueStyle]'s own trait multiplier, same shape/neutral-at-null
+/// contract as [humorMatch]/[curiosityMatch]/[warmthMatch]: `null` style is
+/// always 1.0 (no bias). Reuses [CharacterPersonality] axes already
+/// declared rather than adding new state — [warmth]/[humor] were already
+/// wired to [ReplyTone.warm]/[DialogueLine.isJoke]; [strictness] and
+/// [talkativeness] were carried but explicitly left unwired (see
+/// [CharacterPersonality]'s own doc comment) until now:
+/// - [warm]/[affectionate] scale with [warmth] — the same trait that
+///   already favors a warm-toned line favors an affectionately-styled one.
+/// - [funny]/[playful] scale with [humor] — mirrors [humorMatch].
+/// - [serious] scales UP with [strictness]; [casual] scales up with its
+///   INVERSE (100 - strictness) — one trait, two opposite style ends, same
+///   inversion pattern [patienceMatch] already uses for `100 - patience`.
+/// - [short] scales up with the inverse of [talkativeness] — a terse
+///   character reaches for the short line; a talkative one doesn't avoid it
+///   (no positive "long" style exists to reward instead), so only this one
+///   end of the axis is wired.
+double styleMatch(DialogueStyle? style, CharacterPersonality personality) {
+  return switch (style) {
+    null => 1.0,
+    DialogueStyle.warm || DialogueStyle.affectionate => _traitScale(personality.warmth),
+    DialogueStyle.funny || DialogueStyle.playful => _traitScale(personality.humor),
+    DialogueStyle.serious => _traitScale(personality.strictness),
+    DialogueStyle.casual => _traitScale(100 - personality.strictness),
+    DialogueStyle.short => _traitScale(100 - personality.talkativeness),
+  };
 }
 
 /// Neutral (1.0) for a line that doesn't specifically acknowledge a dodge —
@@ -1042,6 +1528,11 @@ double recallMatch(DialogueLine line, List<ConversationEvent> recent, int curren
         MemoryImportance.low => 2.0,
         MemoryImportance.medium => 4.0,
         MemoryImportance.high => 7.0,
+        // Phase 11: a callback to a critical (milestone-tier, permanent)
+        // exchange should read as more insistent than even a high-importance
+        // one — same reasoning the doc comment above gives for high over
+        // medium, one notch further.
+        MemoryImportance.critical => 10.0,
       };
     }
   }
@@ -1143,6 +1634,73 @@ bool detectToneShift({required ReplyTone? previousTone, required ReplyTone tone}
   );
 }
 
+/// How emotionally deep the conversation is running right now (Phase 16),
+/// from small talk up to a full confrontation. Declaration order IS depth
+/// order — `.index` compares directly, the same convention
+/// [MemoryImportance]'s ordering already relies on (see [recallMatch]'s
+/// `strongest` reduce) — so [DialogueLine.minDepth]/[maxDepth] can gate on
+/// it the exact same shape [progressionMin]/[progressionMax] already gate on
+/// [DialogueContext.topicProgress].
+enum ConversationDepth { smallTalk, casual, personal, serious, vulnerable, confrontation }
+
+/// Classifies ONE turn's own depth from what was actually said — the
+/// player's [PersonalReplyAction]/chosen [DialogueLine] properties, not the
+/// thread's already-tracked depth (see [advanceDepth] for how the two
+/// combine). Mirrors the worked examples this was speced against:
+/// - "How's work?" — a light topic, unremarkable intensity -> [casual].
+/// - "I'm having money problems." — [Topic.money] at a real but moderate
+///   intensity -> [personal].
+/// - "I'm scared I'm going to lose my apartment." — the same kind of topic,
+///   but delivered at real urgency -> [serious]. Intensity, not topic alone,
+///   is what separates these two — the same substance can be personal or
+///   serious depending on how it's actually delivered.
+/// - "I haven't told anyone this." -> [vulnerable]. Not derivable from
+///   topic/tone/intensity the way the tiers above are — a first-time
+///   disclosure is a fact about the specific content, not a register, so
+///   [isVulnerableDisclosure] is an explicit flag content sets directly, the
+///   same reasoning [DialogueLine.isJoke] (Phase 15) was added for "this
+///   line is playful" instead of trying to infer it.
+///
+/// [conversationIntent] short-circuits to [ConversationDepth.confrontation]
+/// for [ConversationIntent.confront]/[questionLoyalty] — already the
+/// engine's own "charged, not small talk" signal (see
+/// `CareerController._conversationImportance`'s `critical` set, Phase 11),
+/// so this reuses it rather than inventing a second one. [topic] of `null`
+/// (no topic at all) or [Topic.greeting] never reads as more than
+/// [ConversationDepth.smallTalk], regardless of intensity — "Hey!! 😊" said
+/// enthusiastically is still just a greeting, not something deeper.
+ConversationDepth classifyDepth({
+  ConversationIntent? conversationIntent,
+  required Topic? topic,
+  required double intensity,
+  bool isVulnerableDisclosure = false,
+}) {
+  if (isVulnerableDisclosure) return ConversationDepth.vulnerable;
+  if (conversationIntent == ConversationIntent.confront || conversationIntent == ConversationIntent.questionLoyalty) {
+    return ConversationDepth.confrontation;
+  }
+  if (topic == null || topic == Topic.greeting) return ConversationDepth.smallTalk;
+  if (intensity >= 0.75) return ConversationDepth.serious;
+  if (intensity >= 0.45) return ConversationDepth.personal;
+  return ConversationDepth.casual;
+}
+
+/// Advances `RelationshipState.conversationDepth` (Phase 16) given
+/// [turnDepth] (this turn's own [classifyDepth] result) and [current] (what
+/// the thread was already sitting at). Escalates in one step, all the way to
+/// [turnDepth] — the worked examples in [classifyDepth]'s doc comment read
+/// as one exchange going deeper turn by turn, not something that should lag
+/// behind what was just said. De-escalates only one step at a time, though:
+/// a subsequent small-talk reply shouldn't instantly reset a moment that was
+/// just [ConversationDepth.vulnerable] back to [ConversationDepth.smallTalk]
+/// — that gradual cooldown (not an instant snap-back) is the entire reason
+/// [DialogueLine.minDepth]/[maxDepth] are worth gating on at all, rather than
+/// just reading [turnDepth] directly turn to turn.
+ConversationDepth advanceDepth(ConversationDepth current, ConversationDepth turnDepth) {
+  if (turnDepth.index >= current.index) return turnDepth;
+  return ConversationDepth.values[current.index - 1];
+}
+
 /// Resolves whether a question mama previously asked (if any) got answered
 /// or dodged by the player's latest message, from [wasAnswered] (the
 /// relationship's [RelationshipState]-equivalent state going into this
@@ -1178,9 +1736,12 @@ double _requiredMemoryWeight(DialogueLine line, DialogueContext ctx, int current
 }
 
 /// Formula 16's FinalWeight: BaseWeight x ToneMatch x TopicMatch x
-/// IntentMatch x DodgeMatch x RecallMatch x memory recency x random jitter x
-/// repeat penalty x freshness bonus. [lastUsedDay] of `null` (never used) is
-/// treated as 10+ days fresh, the same as any well-rested line.
+/// IntentMatch x DodgeMatch x RecallMatch x memory recency x [humorMatch] x
+/// [curiosityMatch] x [warmthMatch] x [patienceMatch] x [styleMatch]
+/// (Phase 15's character-personality terms) x random jitter x repeat
+/// penalty x freshness bonus.
+/// [lastUsedDay] of `null` (never used) is treated as 10+ days fresh, the
+/// same as any well-rested line.
 ///
 /// Freshness/repeat normally run on day granularity — fine for content that's
 /// sent at most a few times a day, but a personal thread can see a dozen
@@ -1208,6 +1769,11 @@ double _finalWeight(
   final tsm = toneShiftMatch(line.acknowledgesToneShift, ctx.toneShift);
   final mw = _requiredMemoryWeight(line, ctx, currentDay);
   final rm = recallMatch(line, ctx.recentConversation, currentTurn ?? currentDay * 4);
+  final hm = humorMatch(line.isJoke, ctx.personality.humor);
+  final cm = curiosityMatch(line.intent, ctx.personality.curiosity);
+  final wm = warmthMatch(line.tone, ctx.personality.warmth);
+  final pm = patienceMatch(line.tone, ctx.personality.patience, ctx.consecutiveActionCount);
+  final sm = styleMatch(line.style, ctx.personality);
   final double daysSince;
   if (currentTurn != null) {
     final lastTurn = lineLastUsedTurn[line.text];
@@ -1221,40 +1787,128 @@ double _finalWeight(
   final rngFactor = 1 + rng.nextDouble() * 0.15;
   final recentPenalty = (1 - recentUses * 0.1).clamp(0.1, 1.0);
   final freshnessBonus = 1 + daysSince * 0.05;
-  return line.weight * tm * tpm * im * dm * aqm * tsm * mw * rm * rngFactor * recentPenalty * freshnessBonus;
+  return line.weight * tm * tpm * im * dm * aqm * tsm * mw * rm * hm * cm * wm * pm * sm * rngFactor * recentPenalty * freshnessBonus;
 }
 
-/// Narrows [eligible] to a "topic tier" before scoring — the fix for a
-/// pool-with-enough-generic-lines drowning out the handful of lines that
-/// actually address what's live (see topicMatch()'s doc comment). Tries, in
-/// order: lines tagged with the thread's tracked topic ([currentTopic]);
-/// failing that, lines tagged with a topic the player just raised this turn
-/// ([playerTopics]); failing that, every eligible line untouched. Each tier
-/// is tried only if it's non-empty, so this never narrows a pool down to
-/// nothing — pickLine()'s always-eligible-line contract is unaffected, it
-/// just means "eligible AND on-topic when that's possible" instead of
-/// "eligible" alone.
-List<DialogueLine> _topicTier(List<DialogueLine> eligible, Topic? currentTopic, Set<Topic> playerTopics) {
-  if (currentTopic != null) {
-    final onTopic = eligible.where((l) => l.topic == currentTopic).toList();
-    if (onTopic.isNotEmpty) return onTopic;
+/// How weighty the current exchange reads right now (Phase 14) — drives how
+/// tightly [_topicTier] holds to the live topic vs lets a reply wander (see
+/// [topicTierWeights]). A three-way read of signals [DialogueContext] already
+/// carries, not a new tracked field: [DialogueContext.suspicion] and
+/// [DialogueContext.mood] are the two axes already standing in for "things
+/// are tense" elsewhere in this engine (see [nudgeSuspicionFromDodgePattern]/
+/// [decayMood]), and [Topic.suspicion] is the one [Topic] tag that's
+/// explicitly about something being wrong, the same way [Topic.greeting]/
+/// [Topic.wellbeing]/[Topic.goodNews] are explicitly light conversational
+/// registers (see the [Topic] enum's own doc comment). Neither a serious nor
+/// a casual signal -> [moderate], the register the 70/15/10/5 split below
+/// was written against.
+enum ConversationRegister { casual, moderate, serious }
+
+ConversationRegister conversationRegister(DialogueContext ctx) {
+  if (ctx.suspicion >= 70 || ctx.currentTopic == Topic.suspicion || ctx.mood <= -40) {
+    return ConversationRegister.serious;
   }
-  if (playerTopics.isNotEmpty) {
-    final justRaised = eligible.where((l) => l.topic != null && playerTopics.contains(l.topic)).toList();
-    if (justRaised.isNotEmpty) return justRaised;
+  if (ctx.suspicion <= 20 &&
+      ctx.mood >= -10 &&
+      (ctx.currentTopic == null ||
+          ctx.currentTopic == Topic.greeting ||
+          ctx.currentTopic == Topic.wellbeing ||
+          ctx.currentTopic == Topic.goodNews)) {
+    return ConversationRegister.casual;
   }
-  return eligible;
+  return ConversationRegister.moderate;
+}
+
+/// [_topicTier]'s four weighted buckets (Phase 14), summing to 1.0:
+/// [currentTopic] — a line tagged with the thread's tracked topic;
+/// [playerMentioned] — a line tagged with a DIFFERENT topic the player just
+/// raised this same turn; [tangent] — a line tagged with some other topic
+/// entirely (a natural digression); [initiative] — an untagged line (the
+/// character bringing up something of their own, topic-agnostic). Replaces
+/// the old hard cutoff (100% [currentTopic] whenever any eligible line
+/// carried it) with a weighted draw, so a conversation can wander without
+/// [currentTopic] ever losing its dominant share.
+class TopicTierWeights {
+  final double currentTopic, playerMentioned, tangent, initiative;
+  const TopicTierWeights({
+    required this.currentTopic,
+    required this.playerMentioned,
+    required this.tangent,
+    required this.initiative,
+  });
+}
+
+const _kModerateTopicWeights = TopicTierWeights(currentTopic: 0.70, playerMentioned: 0.15, tangent: 0.10, initiative: 0.05);
+// Little room to wander — a real question or confrontation shouldn't get
+// derailed by a tangent, and a secondary aside the player mentioned in
+// passing doesn't deserve a pickup mid-crisis (0 share, not just a small one).
+const _kSeriousTopicWeights = TopicTierWeights(currentTopic: 0.90, playerMentioned: 0.0, tangent: 0.05, initiative: 0.05);
+// Room to breathe — small talk can drift onto a tangent or a fresh thought
+// just as easily as it stays put; a secondary aside isn't being suppressed
+// on purpose here either (0 share), it's just not one of the three things
+// casual conversation actually reaches for.
+const _kCasualTopicWeights = TopicTierWeights(currentTopic: 0.60, playerMentioned: 0.0, tangent: 0.20, initiative: 0.20);
+
+TopicTierWeights topicTierWeights(ConversationRegister register) => switch (register) {
+      ConversationRegister.moderate => _kModerateTopicWeights,
+      ConversationRegister.serious => _kSeriousTopicWeights,
+      ConversationRegister.casual => _kCasualTopicWeights,
+    };
+
+/// Splits [eligible] into [TopicTierWeights]'s four buckets and draws one,
+/// weighted by [topicTierWeights] for [ctx]'s [conversationRegister] — the
+/// Phase 14 replacement for the old hard cutoff (100% on-topic whenever any
+/// eligible line carried [DialogueContext.currentTopic]; see this function's
+/// git history for that version). No live topic at all means there's nothing
+/// to weigh "on-topic" against, so tiering is skipped entirely and every
+/// eligible line stays in play, same as before.
+///
+/// The four buckets exactly partition [eligible] (every line falls into
+/// precisely one — see the class-level doc comment), so excluding empty
+/// buckets and any bucket a caller's [TopicTierWeights] zeroed out (e.g.
+/// [ConversationRegister.serious]'s `playerMentioned: 0.0`) before drawing
+/// still always leaves at least one candidate: [eligible] itself is
+/// non-empty, so some bucket must be too. Falling back to the untouched
+/// [eligible] list is a documented safety net for a [TopicTierWeights] that
+/// zeroed out every bucket that happens to be non-empty (not reachable with
+/// the three built-in registers above, but a future custom weighting
+/// shouldn't have to reprove this function's own invariant to stay safe).
+List<DialogueLine> _topicTier(List<DialogueLine> eligible, DialogueContext ctx, Random rng) {
+  final currentTopic = ctx.currentTopic;
+  if (currentTopic == null) return eligible;
+
+  final onTopic = eligible.where((l) => l.topic == currentTopic).toList();
+  final playerMentioned = eligible.where((l) => l.topic != null && l.topic != currentTopic && ctx.playerTopics.contains(l.topic)).toList();
+  final tangent = eligible.where((l) => l.topic != null && l.topic != currentTopic && !ctx.playerTopics.contains(l.topic)).toList();
+  final initiative = eligible.where((l) => l.topic == null).toList();
+
+  final weights = topicTierWeights(conversationRegister(ctx));
+  final buckets = [
+    (onTopic, weights.currentTopic),
+    (playerMentioned, weights.playerMentioned),
+    (tangent, weights.tangent),
+    (initiative, weights.initiative),
+  ].where((b) => b.$1.isNotEmpty && b.$2 > 0).toList();
+  if (buckets.isEmpty) return eligible;
+
+  final total = buckets.fold(0.0, (a, b) => a + b.$2);
+  var r = rng.nextDouble() * total;
+  for (final bucket in buckets) {
+    r -= bucket.$2;
+    if (r <= 0) return bucket.$1;
+  }
+  return buckets.last.$1;
 }
 
 /// Picks a weighted-random line from [pool] using formula 16's FinalWeight —
 /// context first, randomness second. Line selection happens in two passes:
-/// first [_topicTier] narrows the eligible lines down to whichever ones
-/// actually address the live topic (falling through tiers only when a
-/// narrower one would be empty — see its doc comment), THEN the remaining
-/// candidates are scored and weighted-randomly drawn from, so variety (tone
-/// match, freshness, repeat penalty, rng jitter) still applies — just among
-/// options that all fit the moment, instead of across the whole pool
-/// regardless of fit.
+/// first [_topicTier] draws a topic-relevance bucket (Phase 14: on-topic vs
+/// player-mentioned vs a natural tangent vs the character's own initiative,
+/// weighted by [conversationRegister] — see its own doc comment for why this
+/// isn't the old hard 100%-on-topic cutoff), THEN the remaining candidates
+/// are scored and weighted-randomly drawn from, so variety (tone match,
+/// freshness, repeat penalty, rng jitter) still applies — just among options
+/// from the drawn bucket, instead of across the whole pool regardless of fit.
 ///
 /// [lineLastUsedDay] and [recentLineHistory] (last 5 lines sent by this
 /// contact, any pool, most-recent-last) drive the variety/repetition terms —
@@ -1278,7 +1932,7 @@ DialogueLine? pickLine(
   final eligible = pool.where((l) => l.isEligible(ctx)).toList();
   if (eligible.isEmpty) return null;
 
-  final candidates = _topicTier(eligible, ctx.currentTopic, ctx.playerTopics);
+  final candidates = _topicTier(eligible, ctx, rng);
 
   final scores = [
     for (final l in candidates)

@@ -23,10 +23,10 @@ const Map<ConversationIntent, Map<ReplyTone, List<DialogueLine>>> kMamaIntentRea
       DialogueLine('There he is. I was starting to think you finally learned how to behave.', weight: 1.5, closenessMin: 60, moodMin: 10),
       DialogueLine('Ay, mijo! Perfect timing, I was just thinking about you.', weight: 1.3, closenessMin: 40),
       DialogueLine("Hey you. Don't be a stranger, okay?", weight: 1.2),
-      DialogueLine("Oh, so you do know my number.", weight: 1.0, tone: ReplyTone.honest, trustMax: 60, closenessMax: 55),
+      DialogueLine("Oh, so you do know my number.", weight: 1.0, tone: ReplyTone.honest, trustMax: 60, closenessMax: 55, isJoke: true),
       DialogueLine("You don't usually check in this early. What's going on?", weight: 1.4, suspicionMin: 45),
       DialogueLine('What do you want?', weight: 1.6, moodMax: -25, trustMax: 35),
-      DialogueLine("Look who remembered he has a mother.", weight: 1.2, moodMax: -5, moodMin: -30),
+      DialogueLine("Look who remembered he has a mother.", weight: 1.2, moodMax: -5, moodMin: -30, isJoke: true),
     ],
     ReplyTone.vague: [
       DialogueLine("Hey. What's this about?", weight: 1.2, suspicionMin: 40),
@@ -124,8 +124,12 @@ const Map<ConversationIntent, Map<ReplyTone, List<DialogueLine>>> kMamaIntentRea
   ConversationIntent.joke: {
     ReplyTone.warm: [
       DialogueLine("Ay, you're too much, mijo. Too much.", weight: 1.4, closenessMin: 45, moodMin: 0),
-      DialogueLine("I'm putting that one in my collection. You're funnier than your father, don't tell him.", weight: 1.3, closenessMin: 55, moodMin: 10),
-      DialogueLine("Okay THAT one made me laugh out loud. I mean it.", weight: 1.2),
+      // isJoke (Phase 15) — the genuinely playful, laughing-along picks in
+      // this pool, boosted by humorMatch for a high-humor character; not a
+      // full pass over the pool, a representative sample (same scope as
+      // establishesFacts'/requiredFacts' own worked example elsewhere).
+      DialogueLine("I'm putting that one in my collection. You're funnier than your father, don't tell him.", weight: 1.3, closenessMin: 55, moodMin: 10, isJoke: true),
+      DialogueLine("Okay THAT one made me laugh out loud. I mean it.", weight: 1.2, isJoke: true),
       DialogueLine("You get that sense of humor from me, you know.", weight: 1.0, closenessMin: 50),
     ],
     ReplyTone.vague: [
@@ -413,6 +417,383 @@ const Map<ConversationIntent, Map<ReplyTone, List<DialogueLine>>> kMamaIntentRea
       DialogueLine("Fine — but something's going on, mijo. I can tell.", weight: 1.8, topic: Topic.suspicion, suspicionMin: 20),
       DialogueLine("Okay. Just don't shut me out completely, okay?", weight: 1.8, topic: Topic.wellbeing),
       DialogueLine("Alright, we can leave family out of it. For now.", weight: 1.6, topic: Topic.family),
+    ],
+  },
+
+  // ── Phase 2: story-event chips (see conversation/reply_tray.dart's
+  // `_storyContextChips` and ConversationIntent's own doc comment) ─────────
+  // Each of these reacts to ONE specific narrative beat, not a topic in the
+  // abstract — that specificity is exactly why they're isolated here instead
+  // of left in the 400+ line generic pool, where a same-topic/same-tone line
+  // written for a completely different moment could win the draw instead.
+
+  ConversationIntent.admitBribe: {
+    ReplyTone.honest: [
+      DialogueLine("Mijo... that's not something to feel good about. But I hear you.", weight: 1.4),
+      DialogueLine("You're paying people off now? Since when did it get like this?", weight: 1.5, suspicionMin: 20),
+      DialogueLine("I don't want to know the details. Just be careful who you trust.", weight: 1.3, trustMax: 55),
+      DialogueLine("That's the kind of thing that catches up with you eventually, mijo.", weight: 1.4, moodMax: 0),
+    ],
+    ReplyTone.vague: [
+      DialogueLine("Vague as ever. But I know money doesn't just disappear for nothing.", weight: 1.3),
+      DialogueLine("Okay... I won't ask more. Just be smart, mijo.", weight: 1.2),
+      DialogueLine("Something tells me that's not the whole story.", weight: 1.4, suspicionMin: 30),
+    ],
+  },
+
+  ConversationIntent.reportCloseCall: {
+    ReplyTone.honest: [
+      DialogueLine("A close call? Mijo, my heart just stopped. Please, PLEASE be careful.", weight: 1.6),
+      DialogueLine("You're scaring me. I need you to slow down out there.", weight: 1.5, suspicionMin: 20),
+      DialogueLine("Thank God you're okay. I mean that, mijo.", weight: 1.4),
+      DialogueLine("I don't know how many more of these 'close calls' I can hear about.", weight: 1.2, suspicionMin: 40),
+    ],
+    ReplyTone.vague: [
+      DialogueLine("Too close for MY comfort too, hearing that.", weight: 1.3),
+      DialogueLine("You say that so casually. It doesn't feel casual to me.", weight: 1.4, moodMax: 0),
+    ],
+  },
+
+  ConversationIntent.reportSuccess: {
+    ReplyTone.warm: [
+      DialogueLine("See? I told you things would turn around, mijo!", weight: 1.5),
+      DialogueLine("That's what I like to hear! I'm proud of you.", weight: 1.4),
+      DialogueLine("Look at you, actually getting the hang of it. My boy.", weight: 1.3, closenessMin: 40),
+      DialogueLine("Finally, some good news. I needed that today.", weight: 1.2, moodMax: 10),
+    ],
+  },
+
+  ConversationIntent.admitCrossedLine: {
+    ReplyTone.honest: [
+      DialogueLine("Mijo... whatever it was, I hope you can live with it.", weight: 1.5),
+      DialogueLine("I don't need the details. But I can hear it in how you're talking.", weight: 1.4),
+      DialogueLine("You sound different saying that. Are you doing okay?", weight: 1.3, suspicionMin: 20),
+      DialogueLine("I raised you better than this. But I still love you, no matter what.", weight: 1.6, moodMax: -10, trustMax: 50),
+    ],
+  },
+
+  ConversationIntent.admitViolence: {
+    ReplyTone.vague: [
+      DialogueLine("'Handled it' is doing a lot of work in that sentence, mijo.", weight: 1.4),
+      DialogueLine("I don't like the sound of that. Please tell me you're safe.", weight: 1.5, suspicionMin: 20),
+      DialogueLine("Some people push you — and some people you shouldn't be around.", weight: 1.3),
+    ],
+    ReplyTone.honest: [
+      DialogueLine("Ugly is a scary word, mijo. Are you actually okay?", weight: 1.5),
+      DialogueLine("I hate that this is normal for you now.", weight: 1.4, moodMax: -10),
+      DialogueLine("Just promise me you're being careful out there.", weight: 1.3),
+    ],
+  },
+
+  ConversationIntent.reportPushback: {
+    ReplyTone.honest: [
+      DialogueLine("People pushing back on you — that sounds stressful, mijo.", weight: 1.3),
+      DialogueLine("As long as you handled it the right way.", weight: 1.2, trustMax: 55),
+    ],
+    ReplyTone.vague: [
+      DialogueLine("People are difficult, huh? Story of my life too.", weight: 1.2),
+      DialogueLine("You always find the difficult ones, don't you.", weight: 1.1, moodMin: 10),
+    ],
+  },
+
+  ConversationIntent.reportCrewTrouble: {
+    ReplyTone.vague: [
+      DialogueLine("Drama with your team? Mijo, be careful who you surround yourself with.", weight: 1.4),
+      DialogueLine("Trust issues, huh. Maybe that's telling you something.", weight: 1.3, suspicionMin: 20),
+    ],
+    ReplyTone.honest: [
+      DialogueLine("Managing people is hard, mijo. You're learning that the grown-up way.", weight: 1.3),
+      DialogueLine("I always said you'd be good at leading. Even if it's exhausting.", weight: 1.2, closenessMin: 40),
+    ],
+  },
+
+  ConversationIntent.reportIncursion: {
+    ReplyTone.vague: [
+      DialogueLine("Tense? That doesn't sound good, mijo. Please watch yourself.", weight: 1.5, suspicionMin: 20),
+      DialogueLine("People testing you... I don't like the sound of that.", weight: 1.4),
+      DialogueLine("You always downplay this stuff. I can tell it's more than 'tense.'", weight: 1.3, trustMax: 55),
+    ],
+  },
+
+  ConversationIntent.admitMistake: {
+    ReplyTone.honest: [
+      DialogueLine("Mistakes happen, mijo. As long as you learned from it.", weight: 1.5),
+      DialogueLine("Almost blew it, huh? That's still a close one. Be more careful.", weight: 1.4, suspicionMin: 15),
+      DialogueLine("I trust you're taking it seriously. Don't make a habit of it.", weight: 1.3),
+      DialogueLine("You sound rattled. Are you actually okay?", weight: 1.2, moodMax: 0),
+    ],
+  },
+
+  // ── Phase 3, batch 1: the rest of _storyContextChips ─────────────────────
+
+  ConversationIntent.reportCantSleep: {
+    ReplyTone.honest: [
+      DialogueLine("You should be sleeping, mijo, not texting your mother.", weight: 1.4),
+      DialogueLine("Whatever's keeping you up, I hope it's nothing bad.", weight: 1.3, suspicionMin: 20),
+      DialogueLine("I'm up too, if it helps to know that.", weight: 1.2, closenessMin: 45),
+    ],
+  },
+
+  ConversationIntent.reportBigDayAhead: {
+    ReplyTone.warm: [
+      DialogueLine("You've got this, mijo. I believe in you.", weight: 1.4),
+      DialogueLine("Sending you all the good energy I've got today.", weight: 1.2),
+    ],
+    ReplyTone.honest: [
+      DialogueLine("Up early worrying, huh. That's my boy — comes by it honestly.", weight: 1.3),
+      DialogueLine("Whatever it is, just breathe. You'll be fine.", weight: 1.2, moodMin: 0),
+    ],
+  },
+
+  ConversationIntent.reportLongDay: {
+    ReplyTone.honest: [
+      DialogueLine("Sounds like a lot, mijo. Get some real rest tonight.", weight: 1.4),
+      DialogueLine("Long days catch up with you. Don't run yourself into the ground.", weight: 1.3, moodMax: 10),
+    ],
+    ReplyTone.warm: [
+      DialogueLine("Glad you can finally breathe. You've earned it.", weight: 1.4),
+      DialogueLine("Take the quiet while you have it, mijo.", weight: 1.2),
+    ],
+  },
+
+  ConversationIntent.reportBroke: {
+    ReplyTone.honest: [
+      DialogueLine("Money being tight scares me for you, mijo. Please be careful.", weight: 1.5, suspicionMin: 15),
+      DialogueLine("You know I'll help if I can. Don't do anything stupid over money.", weight: 1.4, closenessMin: 45),
+      DialogueLine("Tight is tight. It happens. Just don't let it push you into something worse.", weight: 1.3),
+    ],
+  },
+
+  ConversationIntent.reportDoingWell: {
+    ReplyTone.warm: [
+      DialogueLine("That's what I like to hear, mijo. Finally, some breathing room.", weight: 1.4),
+      DialogueLine("Good. Now don't go spending it all in one place.", weight: 1.2, moodMin: 0),
+      DialogueLine("See? Things turn around. I'm proud of you.", weight: 1.3, closenessMin: 40),
+    ],
+  },
+
+  ConversationIntent.reportHeatHigh: {
+    ReplyTone.honest: [
+      DialogueLine("That scares me, mijo. Please, PLEASE be careful.", weight: 1.6, suspicionMin: 20),
+      DialogueLine("I don't like the sound of 'risky.' Watch yourself.", weight: 1.4),
+    ],
+    ReplyTone.vague: [
+      DialogueLine("Attention like that never means anything good. Be smart.", weight: 1.5, suspicionMin: 25),
+      DialogueLine("Lay low if you have to, mijo. I'd rather you safe than sorry.", weight: 1.3),
+    ],
+  },
+
+  ConversationIntent.reportFeelingWatched: {
+    ReplyTone.vague: [
+      DialogueLine("That's an unsettling feeling to have. Trust your gut, mijo.", weight: 1.4, suspicionMin: 20),
+      DialogueLine("Being watched isn't nothing. Please be careful out there.", weight: 1.3),
+    ],
+  },
+
+  ConversationIntent.admitPullingAway: {
+    ReplyTone.honest: [
+      DialogueLine("I noticed, mijo. Thank you for saying it instead of letting me guess.", weight: 1.5, trustMin: 30),
+      DialogueLine("It hasn't been easy, no. But I'm glad you see it too.", weight: 1.3, moodMax: 0),
+    ],
+    ReplyTone.warm: [
+      DialogueLine("I forgive you. I just want you close again, mijo.", weight: 1.5, closenessMin: 40),
+      DialogueLine("That means a lot to hear. I want to do better too.", weight: 1.3),
+    ],
+  },
+
+  ConversationIntent.apologizeForGoingQuiet: {
+    ReplyTone.warm: [
+      DialogueLine("You had me worried, mijo, but I'm just glad to hear from you now.", weight: 1.5),
+      DialogueLine("It happens. Just don't make it a habit, okay?", weight: 1.3, moodMin: -10),
+      DialogueLine("Welcome back. I missed you.", weight: 1.2, closenessMin: 45),
+    ],
+  },
+
+  ConversationIntent.reportWorkGoingOkay: {
+    ReplyTone.warm: [
+      DialogueLine("Good, mijo. Steady is good. I like hearing that.", weight: 1.3),
+      DialogueLine("See, things are looking up. I'm happy for you.", weight: 1.2, moodMin: 0),
+    ],
+  },
+
+  ConversationIntent.reportNewJob: {
+    ReplyTone.honest: [
+      DialogueLine("New thing, huh? As long as it's legit, that's all I'm asking.", weight: 1.4),
+      DialogueLine("Figuring it out is fine, mijo. Just keep me in the loop.", weight: 1.3),
+    ],
+  },
+
+  ConversationIntent.tooBusyRightNow: {
+    ReplyTone.vague: [
+      DialogueLine("Okay, mijo. Go handle it. Talk later.", weight: 1.3),
+      DialogueLine("Tense, huh. Be careful. Text me when you're free.", weight: 1.4, suspicionMin: 20),
+    ],
+  },
+
+  ConversationIntent.reportJobRoutine: {
+    ReplyTone.vague: [
+      DialogueLine("All that driving can't be good for you. Get some rest when you can.", weight: 1.3),
+      DialogueLine("People asking questions, huh. Just be careful how you answer them.", weight: 1.4, suspicionMin: 25),
+    ],
+  },
+
+  ConversationIntent.reportDifficultPeople: {
+    ReplyTone.honest: [
+      DialogueLine("Some people are just like that, mijo. Don't let them get to you.", weight: 1.3),
+      DialogueLine("Difficult how? That doesn't sound like nothing to me.", weight: 1.4, suspicionMin: 20),
+    ],
+    ReplyTone.vague: [
+      DialogueLine("Not everyone's going to make it easy. Keep your head up.", weight: 1.2),
+    ],
+  },
+
+  ConversationIntent.reportFieldWorkStress: {
+    ReplyTone.vague: [
+      DialogueLine("That sounds exhausting, mijo. Are you actually taking care of yourself?", weight: 1.4),
+      DialogueLine("Face-to-face work wears on you differently. Get some rest.", weight: 1.2),
+    ],
+  },
+
+  ConversationIntent.reportNewResponsibility: {
+    ReplyTone.honest: [
+      DialogueLine("Being in charge is a lot, mijo. I always knew you could handle it though.", weight: 1.4, closenessMin: 40),
+      DialogueLine("People depending on you — that's real pressure. Don't burn out.", weight: 1.3),
+    ],
+  },
+
+  ConversationIntent.admitInOverHead: {
+    ReplyTone.honest: [
+      DialogueLine("You don't have to carry all of it alone, mijo. I'm here.", weight: 1.5),
+      DialogueLine("That's a heavy thing to admit. I'm glad you told me.", weight: 1.4, trustMin: 35),
+    ],
+  },
+
+  ConversationIntent.reportNewCrowd: {
+    ReplyTone.vague: [
+      DialogueLine("New people, huh. Just be careful who you let close, mijo.", weight: 1.4, suspicionMin: 20),
+      DialogueLine("Different crowd worries me a little, honestly. Be smart about it.", weight: 1.3),
+    ],
+  },
+
+  ConversationIntent.admitSelfDoubt: {
+    ReplyTone.honest: [
+      DialogueLine("Thinking about where you're headed is a good thing, mijo. Don't be afraid of it.", weight: 1.4),
+      DialogueLine("You're still you to me, no matter what you're worried about.", weight: 1.5, closenessMin: 45),
+    ],
+  },
+
+  ConversationIntent.admitDeepDoubt: {
+    ReplyTone.honest: [
+      DialogueLine("Mijo... that scares me to hear. Please talk to me about this.", weight: 1.6, suspicionMin: 15),
+      DialogueLine("Nothing is a point of no return while you're still my son. Nothing.", weight: 1.5, closenessMin: 50),
+      DialogueLine("You don't have to carry that by yourself. Let me in.", weight: 1.4),
+    ],
+  },
+
+  ConversationIntent.reachOutNoReason: {
+    ReplyTone.warm: [
+      DialogueLine("You don't need a reason to talk to your mother, mijo.", weight: 1.4),
+      DialogueLine("That's exactly the kind of message I want more of.", weight: 1.3, closenessMin: 40),
+    ],
+  },
+
+  // ── Phase 3, batch 2: kPersonalReplyActions catalog ──────────────────────
+
+  ConversationIntent.reportFollowedThrough: {
+    ReplyTone.honest: [
+      DialogueLine("See? That's what I like to hear. You said it, you did it.", weight: 1.5, trustMin: 30),
+      DialogueLine("Good. That means something to me, mijo.", weight: 1.3),
+    ],
+  },
+
+  ConversationIntent.makeItRight: {
+    ReplyTone.warm: [
+      DialogueLine("Oh, mijo. Come here. I forgive you — I always do.", weight: 1.6, moodMax: 20),
+      DialogueLine("That's all I needed to hear. Thank you for saying it.", weight: 1.4, trustMin: 30),
+    ],
+  },
+
+  ConversationIntent.tellAboutDay: {
+    ReplyTone.honest: [
+      DialogueLine("Normal is good, mijo. Boring days are the best kind.", weight: 1.3),
+      DialogueLine("Glad it wasn't too bad. Get some rest tonight.", weight: 1.2),
+    ],
+  },
+
+  ConversationIntent.shareGoodNews: {
+    ReplyTone.warm: [
+      DialogueLine("Finally! Tell me everything, mijo.", weight: 1.5),
+      DialogueLine("See, I told you things would turn around. I'm so happy for you.", weight: 1.4, moodMin: 0),
+    ],
+  },
+
+  ConversationIntent.changeSubject: {
+    ReplyTone.vague: [
+      DialogueLine("Trying to change the subject on me, huh. Nice try — but okay, I'll bite.", weight: 1.4, suspicionMin: 20),
+      DialogueLine("Aw, asking about me? I'm fine, mijo. The garden's doing well, actually.", weight: 1.3),
+    ],
+  },
+
+  ConversationIntent.denyEverything: {
+    ReplyTone.excuse: [
+      DialogueLine("Mijo, I want to believe you. I really do.", weight: 1.4, trustMax: 45),
+      DialogueLine("Okay. If you say it isn't true, I'll trust you. For now.", weight: 1.3, suspicionMin: 40),
+    ],
+  },
+
+  ConversationIntent.comeCleanPartially: {
+    ReplyTone.honest: [
+      DialogueLine("Okay. Thank you for not pretending everything's fine.", weight: 1.5, trustMin: 35),
+      DialogueLine("'Under control' is doing a lot of work in that sentence, mijo. But okay.", weight: 1.3, suspicionMin: 30),
+    ],
+  },
+
+  ConversationIntent.openUp: {
+    ReplyTone.honest: [
+      DialogueLine("That's a heavy thing to carry. I'm glad you told me instead of hiding it.", weight: 1.7),
+      DialogueLine("You don't have to be okay all the time, mijo. Not with me.", weight: 1.6, closenessMin: 50),
+      DialogueLine("Thank you for trusting me with that. It means everything.", weight: 1.4, trustMin: 40),
+    ],
+  },
+
+  ConversationIntent.keepDistance: {
+    ReplyTone.cold: [
+      DialogueLine("Don't you dare protect me by shutting me out, mijo.", weight: 1.5, trustMin: 40),
+      DialogueLine("The less I know is not the same as it being okay.", weight: 1.4),
+    ],
+  },
+
+  ConversationIntent.missHer: {
+    ReplyTone.warm: [
+      DialogueLine("I miss you too, mijo. Every single day.", weight: 1.6, closenessMin: 45),
+      DialogueLine("Then come home. My door's always open for you.", weight: 1.4),
+    ],
+  },
+
+  // ── Item 11: action chains — "Ask About Uncle" worked example ───────────
+  // Both pools below are the SECOND link of the chain: each has exactly one
+  // line, and that line carries the questionId that opens the chain's next
+  // bespoke tray (see kQuestionAnswerChips in conversation/intents.dart).
+  // Single-line, ungated pools are fine here — these chips are only ever
+  // reachable from one specific prior bespoke tray, not general conversation,
+  // so there's no live-state variation worth branching on yet.
+  ConversationIntent.askAboutUncle: {
+    ReplyTone.honest: [
+      DialogueLine("He's stubborn. Refuses to rest.", weight: 1.0, topic: Topic.family, questionId: 'mama_uncle_stubborn'),
+    ],
+  },
+
+  // Converges the chain back into item 2's EXISTING mama_wellbeing_checkin
+  // tray instead of opening a new leaf — chains can merge, not just branch.
+  ConversationIntent.askIfMamaIsOkay: {
+    ReplyTone.warm: [
+      DialogueLine(
+        "Oh, me? I'm alright, mijo. Just the usual aches. How are YOU doing, really?",
+        weight: 1.0,
+        topic: Topic.wellbeing,
+        intent: Intent.question,
+        questionId: 'mama_wellbeing_checkin',
+      ),
     ],
   },
 };

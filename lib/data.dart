@@ -269,6 +269,10 @@ class PersonalContact {
   final double moodSensitivity; // how much current mood swings that chance; 0 = mood has no effect
   final double emotionalVolatility; // 0..1 -> personalityModifier(), which ranges 0.5 (stable) to 1.0 (volatile)
   final double personalityWarmth; // 0..100 -> baselineAttraction(); 50 = no drift (old behavior)
+  /// Stable line-selection biases (Phase 15) — see [CharacterPersonality]'s
+  /// own doc comment for why this is a separate axis set from
+  /// [personalityWarmth]/[emotionalVolatility] above rather than reusing them.
+  final CharacterPersonality personality;
   const PersonalContact(
     this.id,
     this.name,
@@ -279,17 +283,30 @@ class PersonalContact {
     this.moodSensitivity = 0.0,
     this.emotionalVolatility = 0.5,
     this.personalityWarmth = 50,
+    this.personality = kNeutralPersonality,
   });
 }
 
 const List<PersonalContact> kPersonalContacts = [
   PersonalContact('mama', 'Mamá', 'Mother', 'M',
-      suspicionRate: 0.6, initiative: 0.35, moodSensitivity: 0.35, emotionalVolatility: 0.3, personalityWarmth: 70),
+      suspicionRate: 0.6, initiative: 0.35, moodSensitivity: 0.35, emotionalVolatility: 0.3, personalityWarmth: 70,
+      // Warm, worried, and always asking how you're doing — but her patience
+      // for being stonewalled is not unlimited (see nudgeSuspicionFromDodgePattern
+      // for the separate mechanic that already models that half).
+      personality: CharacterPersonality(warmth: 80, humor: 45, patience: 65, curiosity: 70, strictness: 55, sarcasm: 40, directness: 60, talkativeness: 65)),
   PersonalContact('partner', 'Vale', 'Partner', 'V',
-      suspicionRate: 1.4, initiative: 0.45, moodSensitivity: 0.6, emotionalVolatility: 0.7, personalityWarmth: 55),
-  PersonalContact('friend', 'Kiko', 'Best friend', 'K', emotionalVolatility: 0.6, personalityWarmth: 60),
-  PersonalContact('brother', 'Tono', 'Brother', 'T', emotionalVolatility: 0.4, personalityWarmth: 55),
-  PersonalContact('oldfriend', 'Marco', 'Old friend', 'M', emotionalVolatility: 0.3, personalityWarmth: 60),
+      suspicionRate: 1.4, initiative: 0.45, moodSensitivity: 0.6, emotionalVolatility: 0.7, personalityWarmth: 55,
+      // Volatile and quick to flare (matches her emotionalVolatility above)
+      // — playful when things are good, low patience when they're not.
+      personality: CharacterPersonality(warmth: 65, humor: 55, patience: 40, curiosity: 65, strictness: 35, sarcasm: 55, directness: 70, talkativeness: 70)),
+  PersonalContact('friend', 'Kiko', 'Best friend', 'K', emotionalVolatility: 0.6, personalityWarmth: 60,
+      // The funny best friend — highest humor of the roster by design.
+      personality: CharacterPersonality(warmth: 65, humor: 75, patience: 60, curiosity: 55, strictness: 25, sarcasm: 65, directness: 65, talkativeness: 75)),
+  PersonalContact('brother', 'Tono', 'Brother', 'T', emotionalVolatility: 0.4, personalityWarmth: 55,
+      personality: CharacterPersonality(warmth: 55, humor: 60, patience: 50, curiosity: 45, strictness: 40, sarcasm: 55, directness: 60, talkativeness: 55)),
+  PersonalContact('oldfriend', 'Marco', 'Old friend', 'M', emotionalVolatility: 0.3, personalityWarmth: 60,
+      // Has moved on — drier and less invested than the others, not less warm at heart.
+      personality: CharacterPersonality(warmth: 45, humor: 40, patience: 55, curiosity: 35, strictness: 45, sarcasm: 45, directness: 50, talkativeness: 40)),
 ];
 final Map<String, PersonalContact> kPersonalContact = {for (final p in kPersonalContacts) p.id: p};
 
@@ -343,6 +360,11 @@ class RelationshipState {
   final List<String> recentLineHistory = []; // pickLine() variety scoring — last 5 lines sent, any pool
   Topic? currentTopic; // the topic this conversation thread is presently on — see advanceTopic()
   int topicProgress = 0; // turns spent on currentTopic; 0 when there's no active thread
+  // How emotionally deep the conversation is running right now (Phase 16) —
+  // see ConversationDepth's own doc comment. Starts at smallTalk, same as a
+  // thread that hasn't said anything yet; advanced turn to turn by
+  // advanceDepth()/classifyDepth() in CareerController.personalReplyAction.
+  ConversationDepth conversationDepth = ConversationDepth.smallTalk;
   // Finer-grained "what specifically" within currentTopic — e.g. "rent" or
   // "debt" within Topic.money, distinguishing threads a bare Topic can't tell
   // apart on its own. Null until a reply/line declares one (see
@@ -366,6 +388,13 @@ class RelationshipState {
   // "open for 6 turns but only addressed twice" are both representable.
   int topicTurnsActive = 0;
   bool lastQuestionAnswered = true; // false while a mama-asked Intent.question line is awaiting a real reply
+  /// [DialogueLine.questionId] of whichever question is currently pending
+  /// (mirrors [lastQuestionAnswered] but names WHICH question, not just
+  /// whether one's open) — set alongside `lastQuestionAnswered = false` and
+  /// cleared once it's actually answered (not merely dodged; see
+  /// [DialogueLine.questionId]'s doc comment). `null` whenever no question is
+  /// pending, or a pending one has no bespoke answer chips authored for it.
+  String? pendingQuestionId;
   // Unified tracking for questions/requests/promises left hanging — see
   // PendingInteraction's doc comment. Additive alongside lastQuestionAnswered
   // above, not a replacement for it: that boolean and resolvePendingQuestion's
@@ -490,28 +519,28 @@ class RelationshipContent {
 /// selection via [pickLine] — is unchanged, so replies still land
 /// differently depending on relationship state, mood, and history.
 ///
-/// [resolveText] picks the right wording for the current moment: mood-tier
-/// variants take priority, then time-of-day variants, then the plain [text]
-/// fallback. This keeps the thread feeling alive without adding engine
-/// complexity — only [data.dart] content grows as more variants are written.
+/// [label] is the tray button's text — a named action ("Reassure", "Brush
+/// off"), never the sentence itself; see [ReplyOption.displayLabel]. The
+/// actual message is picked from [phrasings] at send time by
+/// [CareerController.personalReplyAction] — the same pickLine()-driven,
+/// repeat-avoiding selection [IntentChip.phrasings] already uses, so tapping
+/// the same action twice doesn't necessarily send the same sentence twice.
+/// [tone]/[topics]/[intent]/[subject]/[resolvesThread]/[establishesFacts]/
+/// [fulfillsPromise]/[isVulnerableDisclosure] are this action's fallback
+/// register — used for tray-scoring and as defaults for whichever of these a
+/// picked phrasing leaves unset; a specific [DialogueLine] in [phrasings] can
+/// override any of them for that one wording, mirroring [IntentChip]'s
+/// contract exactly (see `CareerController.sendIntent`'s doc comment for the
+/// override pattern this class now shares).
 class PersonalReplyAction {
   final String label; // shown on the option button
-  final String text; // default/fallback text added to the thread
+  final List<DialogueLine> phrasings; // candidate wordings — see class doc
   final ReplyTone tone;
   final Set<Topic> topics;
   final Intent intent;
   final double intensity; // 0..1 — feeds impactMultiplier/nudgeFear/nudgeRespect
   final bool isDebtTopic; // feeds nudgeDebt
   final Set<String>? allowedContacts; // null = offered to every personal contact
-
-  // Time-of-day text variants — null means fall through to [text].
-  final String? textMorning;
-  final String? textEvening;
-  final String? textNight;
-
-  // Mood-tier text variants — checked before time-of-day variants.
-  final String? textWhenLowMood;  // mood < -30
-  final String? textWhenHighMood; // mood > 30
 
   // Visibility gates — action is excluded from the menu when the gate fails.
   // [showWhenMoodBelow]: only offered when mood < threshold (e.g. repair actions).
@@ -567,9 +596,18 @@ class PersonalReplyAction {
   /// aren't "I followed through on what I said."
   final bool fulfillsPromise;
 
+  /// True if this reply is a raw, first-time disclosure — e.g. "I haven't
+  /// told anyone this." Read by `CareerController.personalReplyAction` via
+  /// [classifyDepth] (Phase 16) to floor the conversation's tracked depth at
+  /// [ConversationDepth.vulnerable] regardless of [topics]/[intensity] —
+  /// see [ConversationDepth]'s own doc comment for why this can't be
+  /// inferred the way the other tiers are. Default false: most replies
+  /// aren't a first-time confession.
+  final bool isVulnerableDisclosure;
+
   const PersonalReplyAction(
-    this.label,
-    this.text, {
+    this.label, {
+    required this.phrasings,
     required this.tone,
     this.topics = const {},
     required this.intent,
@@ -580,12 +618,8 @@ class PersonalReplyAction {
     this.resolvesThread = false,
     this.establishesFacts,
     this.fulfillsPromise = false,
+    this.isVulnerableDisclosure = false,
     this.allowedContacts,
-    this.textMorning,
-    this.textEvening,
-    this.textNight,
-    this.textWhenLowMood,
-    this.textWhenHighMood,
     this.showWhenMoodBelow,
     this.showWhenMoodAbove,
     this.requiresThread = false,
@@ -597,19 +631,11 @@ class PersonalReplyAction {
     this.showWhenClosenessAbove,
   });
 
-  /// Returns the most contextually appropriate wording for this action right
-  /// now. Mood-tier variants win first (her current emotional state is the
-  /// strongest context signal), then time-of-day, then plain [text].
-  String resolveText(RelationshipState rel, TimeOfDay tod) {
-    if (rel.mood < -30 && textWhenLowMood != null) return textWhenLowMood!;
-    if (rel.mood > 30 && textWhenHighMood != null) return textWhenHighMood!;
-    return switch (tod) {
-      TimeOfDay.morning => textMorning ?? text,
-      TimeOfDay.evening => textEvening ?? text,
-      TimeOfDay.night   => textNight   ?? text,
-      _                 => text,
-    };
-  }
+  /// The message this instance actually sends. Only meaningful once
+  /// [phrasings] has been narrowed to the single line this turn picked (see
+  /// `CareerController.personalReplyAction`'s resolution step) — falls back
+  /// to the first phrasing when called on a raw, unresolved catalog template.
+  String get text => phrasings.first.text;
 }
 
 /// Full catalog of reply options. Never shown all at once — see
@@ -619,96 +645,203 @@ class PersonalReplyAction {
 /// Actions with [allowedContacts] are only offered for those contacts.
 /// Actions with visibility gates ([showWhenMoodBelow]/[showWhenMoodAbove]/
 /// [requiresThread]) are filtered out when the gate fails, so they only
-/// surface when they actually make sense. Text variants ([textMorning] etc.)
-/// are resolved at render and send time by [PersonalReplyAction.resolveText].
+/// surface when they actually make sense. Each entry's [PersonalReplyAction.
+/// phrasings] holds several candidate wordings — CareerController.
+/// personalReplyAction picks one at send time (see its resolution step),
+/// so tapping the same action again doesn't guarantee the same sentence.
 const List<PersonalReplyAction> kPersonalReplyActions = [
+  // Phase 3: the mama-specific, narrower/level-gated entries below (Make it
+  // right, Tell her about your day, Share something good, Brush it off,
+  // Change the subject, Deny everything, Come clean, Open up, Apologize for
+  // real, Keep her at a distance, Tell her you miss her) plus 'Followed
+  // through' now carry `conversationIntent` — see ConversationIntent's own
+  // doc comment for the Phase 2/3 rationale.
+  //
+  // The GENERIC, high-traffic entries (Greet, Reassure, Be honest, Ask how
+  // they are, Ask about family, Push for answers, Stay vague, Make an
+  // excuse, Brush off, Insult, Talk/Deflect about money, Check in)
+  // deliberately do NOT — they were tagged in an earlier pass and reverted.
+  // Every one of them is also this game's primary vehicle for the engine's
+  // cross-cutting reactive machinery — acknowledgesDodge, acknowledgesToneShift,
+  // acknowledgesAnsweredQuestion, requiredFacts, honestyMin/reliabilityMin
+  // gating, the questionId-tagged bespoke-tray lines (items 2/6/7) — all of
+  // which live ONLY in the generic kPersonalReactions pool, not replicated
+  // in any isolated per-intent one. Routing them through conversationIntent
+  // silently cut Mama's replies off from all of that (confirmed by several
+  // engine tests failing once it was tried), which is a real behavior
+  // regression, not just a test-fixture inconvenience — a "Push for
+  // answers" reply that can never acknowledge a just-dodged prior question
+  // is a worse conversation, not a safer one. These chips are also
+  // deliberately GENERIC in wording ("Hey!", "It's complicated, I don't
+  // really know") specifically so any reasonably-toned generic-pool line
+  // fits them without reading as a non-sequitur — unlike the specific,
+  // one-off story-event confessions Phase 2 targeted, they were never
+  // actually at risk of the collision bug this migration exists to fix.
   PersonalReplyAction(
-    'Greet', 'Hey! 👋',
+    'Greet',
     tone: ReplyTone.warm, topics: {Topic.greeting}, intent: Intent.statement, intensity: 0.4,
-    textMorning: 'Morning! Hope you slept well. ☀️',
-    textEvening: "Hey, how's your evening going? 😊",
-    textNight: 'Hey… you still up? 🌙',
-    textWhenLowMood: "Hi… I've been thinking about you.",
-    textWhenHighMood: 'Hey!! 😊 Just wanted to say hi!',
+    phrasings: [
+      DialogueLine('Hey! 👋'),
+      DialogueLine('Hey, what\'s up?'),
+      DialogueLine('Morning! Hope you slept well. ☀️', timesOfDay: {TimeOfDay.morning}),
+      DialogueLine("Hey, how's your evening going? 😊", timesOfDay: {TimeOfDay.evening}),
+      DialogueLine('Hey… you still up? 🌙', timesOfDay: {TimeOfDay.night}),
+    ],
   ),
-  PersonalReplyAction('Flirt', "Can't stop thinking about you. 😏",
-      tone: ReplyTone.warm, topics: {Topic.affection}, intent: Intent.confession, intensity: 0.6, allowedContacts: {'partner'}),
   PersonalReplyAction(
-    'Reassure', "I've got you. I promise.",
-    tone: ReplyTone.warm, intent: Intent.promise, intensity: 0.6,
-    textMorning: "Just wanted you to know I'm thinking about you today. ❤️",
-    textEvening: "I hope today was okay. I'm here if you need me.",
-    textNight: "You okay? I'm here.",
-    textWhenLowMood: "I know things feel off between us. I'm still here, okay?",
-    textWhenHighMood: "I'm good, I promise. Take care of yourself too. ❤️",
+    'Flirt',
+    tone: ReplyTone.warm, topics: {Topic.affection}, intent: Intent.confession, intensity: 0.6, allowedContacts: {'partner'},
+    phrasings: [
+      DialogueLine("Can't stop thinking about you. 😏"),
+      DialogueLine("You've been on my mind all day."),
+      DialogueLine("Wish you were here right now."),
+    ],
   ),
-  PersonalReplyAction('Be honest', "Honestly? Here's what's going on.", tone: ReplyTone.honest, intent: Intent.statement, intensity: 0.5),
+  PersonalReplyAction(
+    'Reassure',
+    tone: ReplyTone.warm, intent: Intent.promise, intensity: 0.6,
+    phrasings: [
+      DialogueLine("I've got you. I promise."),
+      DialogueLine("You don't have to worry about me."),
+      DialogueLine("Just wanted you to know I'm thinking about you today. ❤️", timesOfDay: {TimeOfDay.morning}),
+      DialogueLine("I hope today was okay. I'm here if you need me.", timesOfDay: {TimeOfDay.evening}),
+      DialogueLine("You okay? I'm here.", timesOfDay: {TimeOfDay.night}),
+    ],
+  ),
+  PersonalReplyAction(
+    'Be honest',
+    tone: ReplyTone.honest, intent: Intent.statement, intensity: 0.5,
+    phrasings: [
+      DialogueLine("Honestly? Here's what's going on."),
+      DialogueLine("Let me just be straight with you."),
+      DialogueLine("I'll tell you the truth, no sugarcoating it."),
+    ],
+  ),
   // Phase 9's reliability example — the "kept" half of a promise, see
   // PersonalReplyAction.fulfillsPromise's doc comment.
-  PersonalReplyAction('Followed through', "Told you I'd handle it. I did.", tone: ReplyTone.honest, intent: Intent.statement, intensity: 0.5, fulfillsPromise: true),
   PersonalReplyAction(
-    'Ask how they are', 'How are you doing?',
+    'Followed through',
+    tone: ReplyTone.honest, intent: Intent.statement, intensity: 0.5, fulfillsPromise: true,
+    conversationIntent: ConversationIntent.reportFollowedThrough,
+    phrasings: [
+      DialogueLine("Told you I'd handle it. I did."),
+      DialogueLine("Said I'd take care of it — done."),
+      DialogueLine("Just like I promised. It's handled."),
+    ],
+  ),
+  PersonalReplyAction(
+    'Ask how they are',
     tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.question, intensity: 0.4,
-    textMorning: 'How are you feeling this morning?',
-    textEvening: 'How was your day?',
-    textNight: "You good? It's late.",
-    textWhenLowMood: "Are you okay? I've been worried about you.",
-    textWhenHighMood: 'How are you? Tell me something good.',
+    phrasings: [
+      DialogueLine('How are you doing?'),
+      DialogueLine('How are you feeling this morning?', timesOfDay: {TimeOfDay.morning}),
+      DialogueLine('How was your day?', timesOfDay: {TimeOfDay.evening}),
+      DialogueLine("You good? It's late.", timesOfDay: {TimeOfDay.night}),
+    ],
   ),
   PersonalReplyAction(
-    'Ask about family', "How's the family?",
+    'Ask about family',
     tone: ReplyTone.honest, topics: {Topic.family}, intent: Intent.question, intensity: 0.4,
-    textMorning: "How's everyone doing this morning?",
-    textEvening: "How's everyone? How's Tono?",
+    phrasings: [
+      DialogueLine("How's the family?"),
+      DialogueLine("How's everyone doing this morning?", timesOfDay: {TimeOfDay.morning}),
+      DialogueLine("How's everyone? How's Tono?", timesOfDay: {TimeOfDay.evening}),
+    ],
   ),
-  PersonalReplyAction('Push for answers', "What's going on with you? Something feels off.", tone: ReplyTone.honest, topics: {Topic.suspicion}, intent: Intent.question, intensity: 0.6),
   PersonalReplyAction(
-    'Stay vague', "It's complicated. I don't really know.",
+    'Push for answers',
+    tone: ReplyTone.honest, topics: {Topic.suspicion}, intent: Intent.question, intensity: 0.6,
+    phrasings: [
+      DialogueLine("What's going on with you? Something feels off."),
+      DialogueLine("Talk to me — something's not right."),
+      DialogueLine("I need you to actually tell me what's happening."),
+    ],
+  ),
+  PersonalReplyAction(
+    'Stay vague',
     tone: ReplyTone.vague, intent: Intent.statement, intensity: 0.4,
-    textWhenLowMood: "I don't know, okay? It's hard to explain right now.",
-    textMorning: "I haven't even had coffee yet. Let's talk later.",
-    textNight: "It's late. Not the right time for this.",
+    phrasings: [
+      DialogueLine("It's complicated. I don't really know."),
+      DialogueLine("I don't know, okay? It's hard to explain right now."),
+      DialogueLine("I haven't even had coffee yet. Let's talk later.", timesOfDay: {TimeOfDay.morning}),
+      DialogueLine("It's late. Not the right time for this.", timesOfDay: {TimeOfDay.night}),
+    ],
   ),
   PersonalReplyAction(
-    'Make an excuse', "Work ran late, that's all it was.",
+    'Make an excuse',
     tone: ReplyTone.excuse, intent: Intent.statement, intensity: 0.5,
-    textMorning: "Got held up with work stuff this morning, that's it.",
-    textWhenLowMood: "I know how it looks. I can't explain everything right now.",
+    phrasings: [
+      DialogueLine("Work ran late, that's all it was."),
+      DialogueLine("Got held up with work stuff this morning, that's it.", timesOfDay: {TimeOfDay.morning}),
+      DialogueLine("I know how it looks. I can't explain everything right now."),
+    ],
   ),
   PersonalReplyAction(
-    'Brush off', 'Not now. Drop it.',
+    'Brush off',
     tone: ReplyTone.cold, intent: Intent.dismissal, intensity: 0.5,
-    textMorning: "Not now. It's too early for this.",
-    textNight: "I'm tired. We're not doing this tonight.",
+    phrasings: [
+      DialogueLine('Not now. Drop it.'),
+      DialogueLine("Not now. It's too early for this.", timesOfDay: {TimeOfDay.morning}),
+      DialogueLine("I'm tired. We're not doing this tonight.", timesOfDay: {TimeOfDay.night}),
+    ],
   ),
-  PersonalReplyAction('Insult', "You're impossible to deal with.", tone: ReplyTone.cold, intent: Intent.dismissal, intensity: 0.9),
-  PersonalReplyAction('Talk about money', "I need to figure out this money situation. I'll pay you back.",
-      tone: ReplyTone.warm, topics: {Topic.money}, intent: Intent.promise, intensity: 0.6, isDebtTopic: true),
-  PersonalReplyAction('Deflect about money', "Not now, I don't want to talk about the rent.",
-      tone: ReplyTone.cold, topics: {Topic.money}, intent: Intent.dismissal, intensity: 0.5, isDebtTopic: true),
+  PersonalReplyAction(
+    'Insult',
+    tone: ReplyTone.cold, intent: Intent.dismissal, intensity: 0.9,
+    phrasings: [
+      DialogueLine("You're impossible to deal with."),
+      DialogueLine("Why do you always do this?"),
+      DialogueLine("I really don't have time for this right now."),
+    ],
+  ),
+  PersonalReplyAction(
+    'Talk about money',
+    tone: ReplyTone.warm, topics: {Topic.money}, intent: Intent.promise, intensity: 0.6, isDebtTopic: true,
+    phrasings: [
+      DialogueLine("I need to figure out this money situation. I'll pay you back."),
+      DialogueLine("I know I owe you. I'm working on getting square."),
+      DialogueLine("Let's actually talk about the money. I want to make it right."),
+    ],
+  ),
+  PersonalReplyAction(
+    'Deflect about money',
+    tone: ReplyTone.cold, topics: {Topic.money}, intent: Intent.dismissal, intensity: 0.5, isDebtTopic: true,
+    phrasings: [
+      DialogueLine("Not now, I don't want to talk about the rent."),
+      DialogueLine("Can we not do the money thing right now?"),
+      DialogueLine("I'll deal with it. Just not right this second."),
+    ],
+  ),
 
   // ── Mamá-specific actions ─────────────────────────────────────────────
   // "Make it right" only surfaces when her mood has dropped below -30 — it's
   // a repair move, not a normal opener, so gateing it keeps it feeling earned.
   PersonalReplyAction(
-    'Make it right', "I know I've been distant, Mamá. I'm sorry. ❤️",
+    'Make it right',
     tone: ReplyTone.warm, intent: Intent.promise, intensity: 0.8,
     allowedContacts: {'mama'},
     showWhenMoodBelow: -30,
-    textWhenLowMood: "I hate that I made you feel like this. I'm sorry, Mamá. ❤️",
+    conversationIntent: ConversationIntent.makeItRight,
+    phrasings: [
+      DialogueLine("I know I've been distant, Mamá. I'm sorry. ❤️"),
+      DialogueLine("I hate that I made you feel like this. I'm sorry, Mamá. ❤️"),
+      DialogueLine("I want to fix this between us, Mamá. Please."),
+    ],
   ),
   // "Check in" is a low-pressure invest action — available once the thread has
   // started, when mood isn't already badly negative (no point offering it mid-fight).
   PersonalReplyAction(
-    'Check in', 'Just checking in. Thinking about you. 💙',
+    'Check in',
     tone: ReplyTone.warm, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.4,
     allowedContacts: {'mama'},
     requiresThread: true,
     showWhenMoodAbove: -20,
-    textMorning: "Good morning, Mamá. Just wanted you to know I'm thinking about you. ☀️",
-    textEvening: 'Evening, Mamá. Just checking in. How are you holding up?',
-    textNight: 'Mamá, still up? I was just thinking about you.',
-    textWhenHighMood: "Mamá! 😊 I'm having a good day and wanted to share that with you.",
+    phrasings: [
+      DialogueLine('Just checking in. Thinking about you. 💙'),
+      DialogueLine("Good morning, Mamá. Just wanted you to know I'm thinking about you. ☀️", timesOfDay: {TimeOfDay.morning}),
+      DialogueLine('Evening, Mamá. Just checking in. How are you holding up?', timesOfDay: {TimeOfDay.evening}),
+      DialogueLine('Mamá, still up? I was just thinking about you.', timesOfDay: {TimeOfDay.night}),
+    ],
   ),
 
   // ── Story-aware / level-gated mama actions ────────────────────────────────
@@ -719,95 +852,157 @@ const List<PersonalReplyAction> kPersonalReplyActions = [
 
   // Early game (levels 1–3): player can still be genuinely open.
   PersonalReplyAction(
-    'Tell her about your day', "Had a pretty normal day, Mamá. Nothing crazy.",
+    'Tell her about your day',
     tone: ReplyTone.honest, topics: {Topic.wellbeing}, intent: Intent.statement, intensity: 0.4,
     allowedContacts: {'mama'},
     showWhenLevelMax: 3,
-    textMorning: "Morning just started but I'm already thinking of you, Mamá.",
-    textEvening: "Day's winding down. Wasn't too bad, honestly.",
+    conversationIntent: ConversationIntent.tellAboutDay,
+    phrasings: [
+      DialogueLine("Had a pretty normal day, Mamá. Nothing crazy."),
+      DialogueLine("Morning just started but I'm already thinking of you, Mamá.", timesOfDay: {TimeOfDay.morning}, topic: Topic.affection, tone: ReplyTone.warm),
+      DialogueLine("Day's winding down. Wasn't too bad, honestly.", timesOfDay: {TimeOfDay.evening}),
+    ],
   ),
   PersonalReplyAction(
-    'Share something good', "Something actually went right today. Feels weird to say.",
+    'Share something good',
     tone: ReplyTone.warm, topics: {Topic.goodNews}, intent: Intent.statement, intensity: 0.5,
     allowedContacts: {'mama'},
     showWhenLevelMax: 3,
     showWhenMoodAbove: 10,
+    conversationIntent: ConversationIntent.shareGoodNews,
+    phrasings: [
+      DialogueLine("Something actually went right today. Feels weird to say."),
+      DialogueLine("Good news, Mamá — today actually went my way."),
+      DialogueLine("Wanted to share something good for once."),
+    ],
   ),
 
   // Mid game (levels 4–6): things are getting complicated; deflection and distance.
+  // Reuses ConversationIntent.deflect — minimizing without engaging is the
+  // same register as tapping "Not Right Now."
   PersonalReplyAction(
-    'Brush it off', "Things are just busy right now, Mamá. Nothing to worry about.",
+    'Brush it off',
     tone: ReplyTone.vague, topics: {Topic.wellbeing}, intent: Intent.dismissal, intensity: 0.4,
     allowedContacts: {'mama'},
     showWhenLevelMin: 4,
     showWhenLevelMax: 7,
-    textWhenLowMood: "I'm fine, Mamá. Please don't read into it.",
+    conversationIntent: ConversationIntent.deflect,
+    phrasings: [
+      DialogueLine("Things are just busy right now, Mamá. Nothing to worry about."),
+      DialogueLine("I'm fine, Mamá. Please don't read into it."),
+      DialogueLine("It's nothing. Just a lot going on."),
+    ],
   ),
   PersonalReplyAction(
-    'Reassure her', "I promise I'm being careful. I love you, Mamá.",
+    'Reassure her',
     tone: ReplyTone.warm, topics: {Topic.affection}, intent: Intent.promise, intensity: 0.6,
     allowedContacts: {'mama'},
     showWhenLevelMin: 4,
     showWhenMoodBelow: 0,
-    textWhenLowMood: "Mamá, I know you're worried. I need you to trust me right now.",
+    phrasings: [
+      DialogueLine("I promise I'm being careful. I love you, Mamá."),
+      DialogueLine("Mamá, I know you're worried. I need you to trust me right now."),
+      DialogueLine("I'm okay, Mamá. I wouldn't lie to you about that."),
+    ],
   ),
   PersonalReplyAction(
-    'Change the subject', "Anyway, how are YOU doing? How's the garden?",
+    'Change the subject',
     tone: ReplyTone.vague, topics: {Topic.family}, intent: Intent.dismissal, intensity: 0.3,
     allowedContacts: {'mama'},
     showWhenLevelMin: 4,
     showWhenSuspicionAbove: 30,
+    conversationIntent: ConversationIntent.changeSubject,
+    phrasings: [
+      DialogueLine("Anyway, how are YOU doing? How's the garden?"),
+      DialogueLine("Enough about me — what's new with you?"),
+      DialogueLine("Let's talk about something else. How's tía doing?"),
+    ],
   ),
 
   // High-suspicion options (she's already worried).
   PersonalReplyAction(
-    'Deny everything', "I don't know what you've heard, Mamá, but it's not true.",
+    'Deny everything',
     tone: ReplyTone.excuse, topics: {Topic.suspicion}, intent: Intent.statement, intensity: 0.7,
     allowedContacts: {'mama'},
     showWhenSuspicionAbove: 50,
     showWhenLevelMin: 3,
-    textWhenLowMood: "Mamá, please. Whatever you think is going on — it isn't.",
+    conversationIntent: ConversationIntent.denyEverything,
+    phrasings: [
+      DialogueLine("I don't know what you've heard, Mamá, but it's not true."),
+      DialogueLine("Mamá, please. Whatever you think is going on — it isn't."),
+      DialogueLine("Whoever told you that is wrong, Mamá."),
+    ],
   ),
   PersonalReplyAction(
-    'Come clean (a little)', "Okay. Things have been… complicated. But I'm handling it.",
+    'Come clean (a little)',
     tone: ReplyTone.honest, topics: {Topic.suspicion, Topic.wellbeing}, intent: Intent.statement, intensity: 0.7,
     allowedContacts: {'mama'},
     showWhenSuspicionAbove: 40,
     showWhenLevelMin: 4,
     showWhenTrustAbove: 45,
+    conversationIntent: ConversationIntent.comeCleanPartially,
+    phrasings: [
+      DialogueLine("Okay. Things have been… complicated. But I'm handling it."),
+      DialogueLine("There's some stuff going on. I'm not gonna pretend there isn't."),
+      DialogueLine("Fine — it's not nothing. But I've got it under control."),
+    ],
   ),
 
   // High closeness — only available when you've built real trust.
   PersonalReplyAction(
-    'Open up', "Things have been hard, Mamá. I don't always know how to talk about it.",
+    'Open up',
     tone: ReplyTone.honest, topics: {Topic.wellbeing, Topic.affection}, intent: Intent.statement, intensity: 0.6,
     allowedContacts: {'mama'},
     showWhenClosenessAbove: 65,
     showWhenLevelMin: 4,
-    textWhenLowMood: "Mamá, I've been carrying a lot. I'm not sure I'm okay.",
+    isVulnerableDisclosure: true,
+    conversationIntent: ConversationIntent.openUp,
+    phrasings: [
+      DialogueLine("Things have been hard, Mamá. I don't always know how to talk about it."),
+      DialogueLine("Mamá, I've been carrying a lot. I'm not sure I'm okay."),
+      DialogueLine("I don't say this enough, but I really needed to talk to you today."),
+    ],
   ),
 
   // Late game (levels 7+): the weight of what the player's doing starts to show.
+  // Reuses ConversationIntent.apologize.
   PersonalReplyAction(
-    'Apologize for real', "I'm sorry, Mamá. For everything. I don't want to lose you.",
+    'Apologize for real',
     tone: ReplyTone.warm, topics: {Topic.affection, Topic.suspicion}, intent: Intent.promise, intensity: 0.9,
     allowedContacts: {'mama'},
     showWhenLevelMin: 7,
-    textWhenLowMood: "Mamá... I know I've hurt you. I'm so, so sorry.",
+    conversationIntent: ConversationIntent.apologize,
+    phrasings: [
+      DialogueLine("I'm sorry, Mamá. For everything. I don't want to lose you."),
+      DialogueLine("Mamá... I know I've hurt you. I'm so, so sorry."),
+      DialogueLine("I've let you down. I know that. I'm sorry, truly."),
+    ],
   ),
   PersonalReplyAction(
-    'Keep her at a distance', "I care about you too much to drag you into this. Please understand.",
+    'Keep her at a distance',
     tone: ReplyTone.cold, topics: {Topic.suspicion}, intent: Intent.dismissal, intensity: 0.6,
     allowedContacts: {'mama'},
     showWhenLevelMin: 7,
     showWhenTrustBelow: 60,
+    conversationIntent: ConversationIntent.keepDistance,
+    phrasings: [
+      DialogueLine("I care about you too much to drag you into this. Please understand."),
+      DialogueLine("It's better if you don't know the details, Mamá."),
+      DialogueLine("The less you know right now, the safer you are."),
+    ],
   ),
   PersonalReplyAction(
-    'Tell her you miss her', "I miss you, Mamá. I miss who I used to be when I was home.",
+    'Tell her you miss her',
     tone: ReplyTone.warm, topics: {Topic.affection, Topic.family}, intent: Intent.statement, intensity: 0.7,
     allowedContacts: {'mama'},
     showWhenLevelMin: 6,
     showWhenClosenessAbove: 50,
+    conversationIntent: ConversationIntent.missHer,
+    phrasings: [
+      DialogueLine("I miss you, Mamá. I miss who I used to be when I was home."),
+      DialogueLine("Wish I could just come home and see you right now."),
+      DialogueLine("I think about home more than I let on, Mamá."),
+    ],
   ),
 ];
 
@@ -1013,20 +1208,25 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
       // will feel natural. A) lines slightly outweigh B) because the most
       // common use of this chip is the player asking about mama.
 
-      // A) Mama receiving the player's concern about her
-      DialogueLine("Ay mijo, you always could tell. I'm fine. Don't worry about me.", weight: 3.0, topic: Topic.suspicion),
-      DialogueLine("Oh. You noticed. I was hoping you wouldn't say anything.", weight: 3.0, topic: Topic.suspicion),
-      DialogueLine("What? I'm fine. Why would you say that?", weight: 2.8, topic: Topic.suspicion),
-      DialogueLine("Am I that obvious? I just... I have a lot on my mind right now.", weight: 2.8, topic: Topic.suspicion),
-      DialogueLine("Nothing gets past you. I'm okay, mijo. Just a little tired.", weight: 2.8, topic: Topic.suspicion),
-      DialogueLine("I didn't want to worry you. But yeah. Things have been heavy.", weight: 2.5, topic: Topic.suspicion),
-      DialogueLine("You're checking up on your mama? That means more than you know.", weight: 2.5, topic: Topic.suspicion),
-      DialogueLine("I'm fine, I'm fine. Stop worrying about me and worry about yourself.", weight: 2.5, topic: Topic.suspicion),
-      DialogueLine("See? You DO care. I was starting to wonder, mijo.", weight: 2.2, topic: Topic.suspicion),
-      DialogueLine("You sound like me. Checking up on people like that.", weight: 2.2, topic: Topic.suspicion),
-      DialogueLine("Mijo... I appreciate you asking. I really do. I'm okay though.", weight: 2.2, topic: Topic.suspicion),
-      DialogueLine("Yeah. Something's been off. I wasn't going to say anything.", weight: 2.0, topic: Topic.suspicion),
-      DialogueLine("You noticed. I'm okay, I just... I'll tell you when I figure it out myself.", weight: 2.0, topic: Topic.suspicion),
+      // A) Mama receiving the player's concern about her.
+      // Same flaw, same fix as the honest-pool SUSPICION cluster below (see
+      // its own comment) — added here too since this warm-pool copy has the
+      // identical shape (self-report about MAMA, weight 2.0-3.0, no gate)
+      // and would leak into the tangent bucket for any unrelated warm
+      // message the exact same way.
+      DialogueLine("Ay mijo, you always could tell. I'm fine. Don't worry about me.", weight: 3.0, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("Oh. You noticed. I was hoping you wouldn't say anything.", weight: 3.0, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("What? I'm fine. Why would you say that?", weight: 2.8, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("Am I that obvious? I just... I have a lot on my mind right now.", weight: 2.8, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("Nothing gets past you. I'm okay, mijo. Just a little tired.", weight: 2.8, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("I didn't want to worry you. But yeah. Things have been heavy.", weight: 2.5, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("You're checking up on your mama? That means more than you know.", weight: 2.5, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("I'm fine, I'm fine. Stop worrying about me and worry about yourself.", weight: 2.5, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("See? You DO care. I was starting to wonder, mijo.", weight: 2.2, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("You sound like me. Checking up on people like that.", weight: 2.2, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("Mijo... I appreciate you asking. I really do. I'm okay though.", weight: 2.2, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("Yeah. Something's been off. I wasn't going to say anything.", weight: 2.0, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("You noticed. I'm okay, I just... I'll tell you when I figure it out myself.", weight: 2.0, topic: Topic.suspicion, when: _playerAskedAQuestion),
 
       // B) Player is hinting at something about themselves — mama pushes back
       DialogueLine("You're hinting at something. I can feel it. Just say it.", weight: 1.8, topic: Topic.suspicion),
@@ -1115,6 +1315,7 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
         topic: Topic.wellbeing,
         intent: Intent.question,
         when: _playerAskedAQuestion,
+        questionId: 'mama_wellbeing_checkin',
       ),
       DialogueLine(
         "I'm alright, mijo. Keeping busy. How about you, really?",
@@ -1122,6 +1323,7 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
         topic: Topic.wellbeing,
         intent: Intent.question,
         when: _playerAskedAQuestion,
+        questionId: 'mama_wellbeing_checkin',
       ),
       DialogueLine(
         "I'm good, mijo. Better now that I'm hearing from you. What's going on with you?",
@@ -1129,6 +1331,7 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
         topic: Topic.wellbeing,
         intent: Intent.question,
         when: _playerAskedAQuestion,
+        questionId: 'mama_wellbeing_checkin',
       ),
       DialogueLine(
         "I'm alright, mijo. Just worried about you. You've been distant lately.",
@@ -1137,6 +1340,7 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
         intent: Intent.question,
         progressionMin: 2,
         when: _playerAskedAQuestion,
+        questionId: 'mama_wellbeing_checkin',
       ),
       DialogueLine(
         "I'm fine, mijo, don't worry about me. I just wish you'd tell me more.",
@@ -1145,6 +1349,7 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
         intent: Intent.question,
         progressionMin: 2,
         when: _playerAskedAQuestion,
+        questionId: 'mama_wellbeing_checkin',
       ),
       // Reacting to the player's own wellbeing — a statement or confession
       // about themselves (a mistake, a close call, exhaustion, being in over
@@ -1157,7 +1362,12 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
       DialogueLine("That's what worries me, mijo. Please, just be careful out there.", weight: 1.7, topic: Topic.wellbeing),
       DialogueLine("I'm glad you're okay. That's really all that matters to me right now.", weight: 1.6, topic: Topic.wellbeing, acknowledgesAnsweredQuestion: true),
       DialogueLine("You need to actually rest, mijo, not just push through it.", weight: 1.4, topic: Topic.wellbeing),
-      DialogueLine("That's a heavy thing to carry. I'm glad you told me instead of hiding it.", weight: 1.6, topic: Topic.wellbeing, acknowledgesAnsweredQuestion: true),
+      // Gated minDepth: ConversationDepth.vulnerable (Phase 16) — "glad you
+      // told me instead of hiding it" only reads right as a response to an
+      // actual first-time disclosure (see PersonalReplyAction.
+      // isVulnerableDisclosure/'Open up'), not ordinary wellbeing chatter at
+      // the same topic tag.
+      DialogueLine("That's a heavy thing to carry. I'm glad you told me instead of hiding it.", weight: 1.6, topic: Topic.wellbeing, acknowledgesAnsweredQuestion: true, minDepth: ConversationDepth.vulnerable),
       DialogueLine("Whatever it is, you don't have to carry it alone. I'm here.", weight: 1.5, topic: Topic.wellbeing),
       // Suspicion/concern-topic answers — mama naming and then unpacking a
       // specific worry over consecutive turns, instead of a flat vague/cold
@@ -1167,12 +1377,14 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
         weight: 1.8,
         topic: Topic.suspicion,
         intent: Intent.question,
+        questionId: 'mama_suspicion_distant',
       ),
       DialogueLine(
         "I can't explain it. A mother just knows. Something's off with you lately.",
         weight: 1.4,
         topic: Topic.suspicion,
         intent: Intent.question,
+        questionId: 'mama_suspicion_distant',
       ),
       DialogueLine(
         "Your messages are shorter. You don't tell me things anymore. Is everything okay with work?",
@@ -1180,6 +1392,7 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
         topic: Topic.suspicion,
         intent: Intent.question,
         progressionMin: 2,
+        questionId: 'mama_suspicion_distant',
       ),
       DialogueLine(
         "You used to tell me everything. Now I have to guess. What changed, mijo?",
@@ -1187,6 +1400,7 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
         topic: Topic.suspicion,
         intent: Intent.question,
         progressionMin: 2,
+        questionId: 'mama_suspicion_distant',
       ),
       DialogueLine("Wait— where did that come from? You were joking around a second ago.", weight: 1.2, acknowledgesToneShift: true),
       DialogueLine("Okay, that's a quick change of mood, mijo. Everything alright?", weight: 1.2, acknowledgesToneShift: true),
@@ -1247,6 +1461,13 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
       DialogueLine("Okay. Family drama. Tell me from the start.", weight: 2.2, topic: Topic.family),
       // family receiving
       DialogueLine("Family is everything, mijo. Don't ever lose sight of that.", weight: 1.8, topic: Topic.family),
+      // Item 11's chain-starter worked example — a plain, no-drama status
+      // update rather than a reaction to a family CONCERN, so it competes
+      // here alongside those on weight alone rather than needing its own
+      // `when` gate; it reads fine either way ("what happened with family?"
+      // still gets a sensible answer). questionId opens the first bespoke
+      // tray of the chain — see kQuestionAnswerChips['mama_uncle_back'].
+      DialogueLine("Everybody's good. Your uncle's been complaining about his back again.", weight: 2.3, topic: Topic.family, questionId: 'mama_uncle_back'),
 
       // GOOD NEWS
       DialogueLine("Oh yeah? Something went right? Okay, tell me. What happened?", weight: 3.0, topic: Topic.goodNews),
@@ -1256,15 +1477,24 @@ const Map<String, Map<ReplyTone, List<DialogueLine>>> kPersonalReactions = {
       DialogueLine("You're being modest. That means it's actually good. Tell me.", weight: 2.2, topic: Topic.goodNews),
 
       // SUSPICION
-      // A) Mama receiving player's concern about her — honest, a little guarded
-      DialogueLine("What? I'm okay. Why, does something seem off?", weight: 3.0, topic: Topic.suspicion),
-      DialogueLine("I'm fine, mijo. You're imagining things.", weight: 3.0, topic: Topic.suspicion),
-      DialogueLine("Okay fine. I've been a little stressed. But I'm handling it.", weight: 2.8, topic: Topic.suspicion),
-      DialogueLine("You noticed. I didn't want to bother you with it.", weight: 2.8, topic: Topic.suspicion),
-      DialogueLine("I'm alright. I just have some things on my mind. It'll pass.", weight: 2.5, topic: Topic.suspicion),
-      DialogueLine("Nothing's wrong. I'm just tired. Stop reading into things, mijo.", weight: 2.5, topic: Topic.suspicion),
-      DialogueLine("Yeah. There's been a lot. But I don't want to put that on you.", weight: 2.2, topic: Topic.suspicion),
-      DialogueLine("You're asking the right questions. That's new. I'm okay though.", weight: 2.2, topic: Topic.suspicion),
+      // A) Mama receiving player's concern about her — honest, a little guarded.
+      // Same flaw, same fix as the wellbeing self-report cluster above (see
+      // its own comment): these are Mama answering FOR HERSELF, only
+      // coherent when the player actually asked/pushed about her — without
+      // `when: _playerAskedAQuestion`, high weights here (2.2-3.0, well
+      // above the "reacting to the player's own wellbeing" cluster's
+      // 1.3-1.7) let pickLine()'s tangent bucket reach for one of these as a
+      // non-sequitur reply to an unrelated confession like "Had a rough one
+      // at work today. Almost blew it." — Mama answering about her OWN
+      // stress instead of reacting to what the player just said.
+      DialogueLine("What? I'm okay. Why, does something seem off?", weight: 3.0, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("I'm fine, mijo. You're imagining things.", weight: 3.0, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("Okay fine. I've been a little stressed. But I'm handling it.", weight: 2.8, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("You noticed. I didn't want to bother you with it.", weight: 2.8, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("I'm alright. I just have some things on my mind. It'll pass.", weight: 2.5, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("Nothing's wrong. I'm just tired. Stop reading into things, mijo.", weight: 2.5, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("Yeah. There's been a lot. But I don't want to put that on you.", weight: 2.2, topic: Topic.suspicion, when: _playerAskedAQuestion),
+      DialogueLine("You're asking the right questions. That's new. I'm okay though.", weight: 2.2, topic: Topic.suspicion, when: _playerAskedAQuestion),
       // B) Player is hiding something — mama pushes
       DialogueLine("You're not being straight with me. What are you not saying?", weight: 1.8, topic: Topic.suspicion),
       DialogueLine("I can tell something's wrong. Just say it, mijo.", weight: 1.8, topic: Topic.suspicion),
@@ -1619,6 +1849,8 @@ const Map<String, RelationshipContent> kRelationshipContent = {
         weight: 1.5,
         topic: Topic.family,
         tone: ReplyTone.vague,
+        intent: Intent.question,
+        questionId: 'mama_brother_distant',
       ),
       DialogueLine(
         "Tono told me something happened. Can you tell me what's going on?",
@@ -1635,6 +1867,7 @@ const Map<String, RelationshipContent> kRelationshipContent = {
         topic: Topic.wellbeing,
         intent: Intent.question,
         tone: ReplyTone.warm,
+        questionId: 'mama_wellbeing_checkin',
       ),
       DialogueLine("Are you eating well? You better be eating well.", weight: 1.5, topic: Topic.health, tone: ReplyTone.honest),
       DialogueLine('I had a dream about you last night. You were smiling. Made me so happy.', weight: 1.5, tone: ReplyTone.warm),
@@ -1660,10 +1893,10 @@ const Map<String, RelationshipContent> kRelationshipContent = {
       // Time-of-day variety — genuinely gated by CareerController.timeOfDay.
       DialogueLine('Good morning, mijo! I made your favorite pan dulce today.', timesOfDay: {TimeOfDay.morning}, weight: 1.5, topic: Topic.family, tone: ReplyTone.warm),
       DialogueLine("Rise and shine, mijo. Don't forget to eat breakfast.", timesOfDay: {TimeOfDay.morning}, weight: 1.0, topic: Topic.health, tone: ReplyTone.honest),
-      DialogueLine("How's your day going so far, mijo?", timesOfDay: {TimeOfDay.afternoon}, weight: 1.0, topic: Topic.wellbeing, intent: Intent.question, tone: ReplyTone.honest),
+      DialogueLine("How's your day going so far, mijo?", timesOfDay: {TimeOfDay.afternoon}, weight: 1.0, topic: Topic.wellbeing, intent: Intent.question, tone: ReplyTone.honest, questionId: 'mama_wellbeing_checkin'),
       DialogueLine('Just took a break from cooking. Thought of you, mijo.', timesOfDay: {TimeOfDay.afternoon}, weight: 1.0, topic: Topic.family, tone: ReplyTone.warm),
       DialogueLine("Dinner's almost ready. Wish you were here to eat with me.", timesOfDay: {TimeOfDay.evening}, weight: 1.5, topic: Topic.plans, tone: ReplyTone.warm),
-      DialogueLine('How was your day, mijo? Tell me about it tonight.', timesOfDay: {TimeOfDay.evening}, weight: 1.0, topic: Topic.wellbeing, intent: Intent.question, tone: ReplyTone.honest),
+      DialogueLine('How was your day, mijo? Tell me about it tonight.', timesOfDay: {TimeOfDay.evening}, weight: 1.0, topic: Topic.wellbeing, intent: Intent.question, tone: ReplyTone.honest, questionId: 'mama_wellbeing_checkin'),
       DialogueLine("Can't sleep. Just thinking about you, mijo.", timesOfDay: {TimeOfDay.night}, weight: 1.0, tone: ReplyTone.warm),
       DialogueLine("It's late. Get some rest, mijo. I love you.", timesOfDay: {TimeOfDay.night}, weight: 1.5, tone: ReplyTone.warm),
       // Weekend variety — genuinely gated by CareerController.isWeekend.
@@ -1675,7 +1908,10 @@ const Map<String, RelationshipContent> kRelationshipContent = {
       DialogueLine('I made pozole today. Wish you could smell it from there.', weight: 1.0, topic: Topic.family, tone: ReplyTone.warm),
       DialogueLine("Your tía asked if you're seeing anyone. I told her that's your business.", weight: 1.0, topic: Topic.family, tone: ReplyTone.honest),
       DialogueLine('I found your old baseball glove cleaning the closet. Made me smile.', weight: 1.0, tone: ReplyTone.warm),
-      DialogueLine("The neighbor's dog had puppies. You should come see them.", weight: 1.0, topic: Topic.plans, tone: ReplyTone.warm),
+      // Gated maxDepth: ConversationDepth.casual (Phase 16) — a throwaway
+      // aside like this reads as tone-deaf once the conversation's actually
+      // turned personal or deeper; it stays out of the running from there.
+      DialogueLine("The neighbor's dog had puppies. You should come see them.", weight: 1.0, topic: Topic.plans, tone: ReplyTone.warm, maxDepth: ConversationDepth.casual),
       DialogueLine('I planted tomatoes this year. You always loved my tomatoes.', weight: 1.0, tone: ReplyTone.warm),
       DialogueLine('Mass was beautiful today. I said a prayer for you.', weight: 1.0, tone: ReplyTone.warm),
       DialogueLine('I ran into your old teacher at the market. She still remembers you.', weight: 1.0, tone: ReplyTone.honest),
@@ -1719,6 +1955,59 @@ const Map<String, RelationshipContent> kRelationshipContent = {
         topic: Topic.plans,
         tone: ReplyTone.honest,
       ),
+      // Promise/request tracking (Phase 10) — a concrete ask with a real
+      // deadline (see DialogueLine.requestsPromise), not just a topic. The
+      // player fulfills it with the generic 'Followed through' action;
+      // letting kDefaultPromiseDeadlineTurns turns pass without that breaks
+      // it (see CareerController._breakOverdueInteractions), which the
+      // memory-gated line just below reacts to.
+      // "Conversation obligation" worked example (see PendingInteraction's
+      // own doc comment, which has been describing this exact question —
+      // subject 'Tono', expecting an answer — since before it existed):
+      // an everyday factual check-in, not gated behind any rare memory the
+      // way mama_brother_distant above is, so it can come up any time family
+      // is on her mind.
+      DialogueLine(
+        'Did you talk to Tono? You two still not speaking?',
+        weight: 1.6,
+        topic: Topic.family,
+        subject: 'Tono',
+        tone: ReplyTone.honest,
+        intent: Intent.question,
+        questionId: 'mama_asked_about_tono',
+      ),
+      DialogueLine(
+        "Promise me you'll call your grandma this week. She keeps asking about you.",
+        weight: 1.5,
+        topic: Topic.family,
+        subject: 'call Grandma',
+        tone: ReplyTone.honest,
+        requestsPromise: true,
+        forbiddenMemories: {MemoryKind.brokenPromise},
+      ),
+      DialogueLine(
+        "You never did call your grandmother, did you? I noticed, mijo.",
+        weight: 2.0,
+        topic: Topic.family,
+        tone: ReplyTone.cold,
+        anyRequiredMemories: {MemoryKind.brokenPromise},
+      ),
+      // Precise callback (Phase 12) — all three gates have to line up before
+      // this fires: she has to actually know the fact (requiredFacts), the
+      // subject has to have genuinely come up before (requiredEventTopic),
+      // and the thread has to currently be on that exact subject
+      // (requiredSubject), not just Topic.plans in general. See
+      // conversation/intents.dart's matching 'coverJob' phrasing for how
+      // topicSubject gets set to 'coverJob' in the first place.
+      DialogueLine(
+        "Driving all day, huh? Please tell me you're being careful out there.",
+        weight: 2.0,
+        topic: Topic.plans,
+        tone: ReplyTone.honest,
+        requiredFacts: {'coverJob': 'driving'},
+        requiredEventTopic: Topic.plans,
+        requiredSubject: 'coverJob',
+      ),
       DialogueLine(
         "Earlier you said something about how you were feeling. I just want to check in again — you sure you're okay?",
         when: _talkedWellbeingToday,
@@ -1726,6 +2015,7 @@ const Map<String, RelationshipContent> kRelationshipContent = {
         topic: Topic.wellbeing,
         intent: Intent.question,
         tone: ReplyTone.warm,
+        questionId: 'mama_wellbeing_checkin',
       ),
       DialogueLine(
         "You brought up money earlier and I've been a little worried since. Is everything alright, mijo?",
@@ -1885,12 +2175,27 @@ const Map<String, RelationshipContent> kRelationshipContent = {
       DialogueLine("This is the last time I'm responding to this, mijo. I mean it.", when: _spamLevel4, weight: 2.5, tone: ReplyTone.cold),
     ],
     dailyRepeatReactions: [
+      // These 6 assume the repeated thing was substantive — a question or
+      // statement worth "asking again"/"already answering." A repeated
+      // GREETING ("hey" twice in one day) doesn't fit that framing at all —
+      // "I answered, you didn't see it?" makes no sense for "Yo." twice, and
+      // reads as Mama misreading a second hello as a forgotten question.
+      // Untagged (topic: null) on purpose so they stay the fallback for
+      // every OTHER repeated action — the Topic.greeting lines just below
+      // dominate pickLine()'s on-topic tier specifically when the repeat was
+      // Greet (see _topicTier's doc comment in dialogue_engine.dart), since
+      // Greet's own `topics: {Topic.greeting}` puts the thread on that topic.
       DialogueLine("Wait — didn't you already ask me that today?", weight: 2.0, tone: ReplyTone.honest),
       DialogueLine("Mijo, you asked me that earlier. Are you sure you're okay?", weight: 2.0, tone: ReplyTone.vague),
       DialogueLine("You asked me the same thing this morning. Is something on your mind?", weight: 1.5, tone: ReplyTone.honest),
       DialogueLine("We talked about this already today, sweetheart. Did you forget?", weight: 1.5, tone: ReplyTone.warm),
       DialogueLine("You already said that to me today. I answered — you didn't see it?", weight: 1.5, tone: ReplyTone.honest),
       DialogueLine("I feel like we're going in circles, mijo. You okay?", weight: 1.5, tone: ReplyTone.vague),
+      // A repeated greeting specifically — warm/amused, not confused.
+      DialogueLine("You really like saying hi to me, mijo. I'm not complaining.", weight: 1.8, tone: ReplyTone.warm, topic: Topic.greeting),
+      DialogueLine("Two hellos in one day? I'll take it.", weight: 1.6, tone: ReplyTone.warm, topic: Topic.greeting),
+      DialogueLine("Someone's been saying hi a lot today. I like it.", weight: 1.5, tone: ReplyTone.warm, topic: Topic.greeting, isJoke: true),
+      DialogueLine("Hi again, mijo. You don't need an excuse to say hello twice.", weight: 1.5, tone: ReplyTone.warm, topic: Topic.greeting),
     ],
     // Ungated on purpose — see RelationshipContent.fallbackReactions. This is
     // the net under every other pool, so it can't have a mood/trust/topic gate

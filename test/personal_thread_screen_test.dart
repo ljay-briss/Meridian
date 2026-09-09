@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:meridian_private/controller.dart';
 import 'package:meridian_private/conversation/intents.dart';
+import 'package:meridian_private/conversation/reply_tray.dart';
 import 'package:meridian_private/data.dart';
 import 'package:meridian_private/theme.dart';
 import 'package:meridian_private/screens/relationships_screen.dart';
@@ -78,6 +79,68 @@ void main() {
         expect(find.text('(${chip.label})'), findsNothing, reason: chip.label);
       }
       expect(find.text("They've blocked you."), findsOneWidget);
+    });
+
+    testWidgets('the "More options" chip expands the tray to every eligible option, and "Show fewer" collapses it back', (tester) async {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      g.devJumpToLevel(4);
+      await tester.pumpWidget(_harness(g));
+      await tester.pump();
+
+      final rel = g.relationships['mama']!;
+      final collapsedOptions = g.personalReplyOptions('mama');
+      final expandedOptions = g.personalReplyOptions('mama', expanded: true);
+      // The expanded set should be a real superset for this state (level 4,
+      // fresh relationship — plenty of gated-out chips to reveal), not just
+      // a relabeling of the same handful.
+      expect(expandedOptions.length, greaterThan(collapsedOptions.length));
+
+      expect(find.text('More options'), findsOneWidget);
+      expect(find.text('Show fewer'), findsNothing);
+      // The collapsed tray scrolls horizontally, so the trailing toggle can
+      // start off-screen — same reason the existing checkIn-chip test above
+      // needs this.
+      await tester.ensureVisible(find.text('More options'));
+      await tester.pump();
+      await tester.tap(find.text('More options'));
+      await tester.pump();
+
+      expect(find.text('Show fewer'), findsOneWidget);
+      expect(find.text('More options'), findsNothing);
+      for (final option in expandedOptions) {
+        expect(find.text(option.displayLabel(rel, g.timeOfDay)), findsOneWidget, reason: option.displayLabel(rel, g.timeOfDay));
+      }
+
+      await tester.tap(find.text('Show fewer'));
+      await tester.pump();
+      expect(find.text('More options'), findsOneWidget);
+      expect(find.text('Show fewer'), findsNothing);
+    });
+
+    testWidgets('sending a reply from the expanded tray collapses it back down', (tester) async {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      g.devJumpToLevel(4);
+      await tester.pumpWidget(_harness(g));
+      await tester.pump();
+
+      await tester.ensureVisible(find.text('More options'));
+      await tester.pump();
+      await tester.tap(find.text('More options'));
+      await tester.pump();
+      expect(find.text('Show fewer'), findsOneWidget);
+
+      final rel = g.relationships['mama']!;
+      final chip = kIntentChips.firstWhere((c) => c.intent == ConversationIntent.checkIn);
+      final chipFinder = find.text(chip.displayLabel(rel, g.timeOfDay));
+      await tester.ensureVisible(chipFinder); // the expanded tray scrolls vertically
+      await tester.pump();
+      await tester.tap(chipFinder);
+      await tester.pump();
+
+      expect(find.text('Show fewer'), findsNothing);
+      expect(find.text('More options'), findsOneWidget);
     });
   });
 }

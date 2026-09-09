@@ -112,6 +112,89 @@ void main() {
       expect(pickLine(rng, pool, bothFacts, currentDay: 1)!.text, 'knows_both');
     });
 
+    test('requiredEventTopic gates eligibility on a matching topic somewhere in recentConversation (Phase 12)', () {
+      final rng = Random(22);
+      const pool = [DialogueLine('asks_about_marcus', requiredEventTopic: Topic.family)];
+      const noHistory = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], recentConversation: [],
+      );
+      expect(pickLine(rng, pool, noHistory, currentDay: 1), isNull);
+
+      final wrongTopic = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: const [], memories: const [],
+        recentConversation: [
+          ConversationEvent(tone: ReplyTone.honest, intensity: 0.5, fromMe: true, turn: 1, day: 1, level: 1, topic: Topic.money),
+        ],
+      );
+      expect(pickLine(rng, pool, wrongTopic, currentDay: 1), isNull);
+
+      final rightTopic = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: const [], memories: const [],
+        recentConversation: [
+          ConversationEvent(tone: ReplyTone.honest, intensity: 0.5, fromMe: true, turn: 1, day: 1, level: 1, topic: Topic.family),
+        ],
+      );
+      expect(pickLine(rng, pool, rightTopic, currentDay: 1)!.text, 'asks_about_marcus');
+    });
+
+    test('requiredSubject gates eligibility on DialogueContext.topicSubject exactly, not just the topic (Phase 12)', () {
+      final rng = Random(23);
+      const pool = [DialogueLine('about_the_brother', requiredSubject: 'brother')];
+      expect(pickLine(rng, pool, _ctx(), currentDay: 1), isNull); // no subject at all
+      const wrongSubject = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], topicSubject: 'aunt',
+      );
+      expect(pickLine(rng, pool, wrongSubject, currentDay: 1), isNull);
+      const rightSubject = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], topicSubject: 'brother',
+      );
+      expect(pickLine(rng, pool, rightSubject, currentDay: 1)!.text, 'about_the_brother');
+    });
+
+    test('requiredFacts + requiredEventTopic + requiredSubject compose (AND) for a precisely-targeted callback', () {
+      final rng = Random(24);
+      const pool = [
+        DialogueLine(
+          "How's Marcus doing?",
+          requiredFacts: {'brotherName': 'Marcus'},
+          requiredEventTopic: Topic.family,
+          requiredSubject: 'brother',
+        ),
+      ];
+      final fact = {'brotherName': ConversationFact(key: 'brotherName', value: 'Marcus', firstMentionedTurn: 1, lastConfirmedTurn: 1)};
+      final familyEvent = [
+        ConversationEvent(tone: ReplyTone.honest, intensity: 0.5, fromMe: true, turn: 1, day: 1, level: 1, topic: Topic.family),
+      ];
+
+      // Missing any one of the three conditions keeps it ineligible.
+      expect(
+        pickLine(rng, pool, DialogueContext(mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0, recentTones: const [], memories: const [], facts: fact, recentConversation: familyEvent), currentDay: 1),
+        isNull,
+        reason: 'missing requiredSubject',
+      );
+      expect(
+        pickLine(rng, pool, DialogueContext(mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0, recentTones: const [], memories: const [], facts: fact, topicSubject: 'brother'), currentDay: 1),
+        isNull,
+        reason: 'missing requiredEventTopic',
+      );
+      expect(
+        pickLine(rng, pool, DialogueContext(mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0, recentTones: const [], memories: const [], recentConversation: familyEvent, topicSubject: 'brother'), currentDay: 1),
+        isNull,
+        reason: 'missing requiredFacts',
+      );
+
+      // All three together -> eligible.
+      expect(
+        pickLine(rng, pool, DialogueContext(mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0, recentTones: const [], memories: const [], facts: fact, recentConversation: familyEvent, topicSubject: 'brother'), currentDay: 1)!.text,
+        "How's Marcus doing?",
+      );
+    });
+
     test('honestyMin/reliabilityMin/responsivenessMin gate eligibility, same shape as trustMin etc. (Phase 9)', () {
       final rng = Random(21);
       final pool = [const DialogueLine('earned_it', honestyMin: 65, reliabilityMin: 60, responsivenessMin: 55)];
@@ -134,6 +217,36 @@ void main() {
       );
       expect(pickLine(rng, pool, shallow, currentDay: 1), isNull);
       expect(pickLine(rng, pool, deep, currentDay: 1)!.text, 'deepens');
+    });
+
+    test('minDepth/maxDepth gate eligibility on conversationDepth, same shape as progressionMin/Max (Phase 16)', () {
+      final rng = Random(36);
+      const deepOnly = [DialogueLine('deep_response', minDepth: ConversationDepth.vulnerable)];
+      const shallowOnly = [DialogueLine('small_talk_only', maxDepth: ConversationDepth.casual)];
+      const smallTalkCtx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], conversationDepth: ConversationDepth.smallTalk,
+      );
+      const personalCtx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], conversationDepth: ConversationDepth.personal,
+      );
+      const vulnerableCtx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], conversationDepth: ConversationDepth.vulnerable,
+      );
+
+      // minDepth: a deep response never surfaces during small talk...
+      expect(pickLine(rng, deepOnly, smallTalkCtx, currentDay: 1), isNull);
+      expect(pickLine(rng, deepOnly, personalCtx, currentDay: 1), isNull);
+      // ...but is reachable once the conversation has actually gotten there.
+      expect(pickLine(rng, deepOnly, vulnerableCtx, currentDay: 1)!.text, 'deep_response');
+
+      // maxDepth: a light aside surfaces during small talk...
+      expect(pickLine(rng, shallowOnly, smallTalkCtx, currentDay: 1)!.text, 'small_talk_only');
+      // ...but not once things have turned personal or deeper.
+      expect(pickLine(rng, shallowOnly, personalCtx, currentDay: 1), isNull);
+      expect(pickLine(rng, shallowOnly, vulnerableCtx, currentDay: 1), isNull);
     });
   });
 
@@ -345,6 +458,160 @@ void main() {
     });
   });
 
+  group('conversationRegister (Phase 14)', () {
+    test('a middling suspicion level (neither low enough for casual nor high enough for serious) reads as moderate', () {
+      expect(conversationRegister(_ctx(suspicion: 40)), ConversationRegister.moderate);
+    });
+
+    test('a blank slate (no topic, no suspicion, neutral mood) reads as casual, not moderate — nothing tense to hold onto', () {
+      expect(conversationRegister(_ctx()), ConversationRegister.casual);
+    });
+
+    test('high suspicion reads as serious', () {
+      expect(conversationRegister(_ctx(suspicion: 70)), ConversationRegister.serious);
+    });
+
+    test('Topic.suspicion as the live topic reads as serious even at low suspicion', () {
+      const ctx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], currentTopic: Topic.suspicion,
+      );
+      expect(conversationRegister(ctx), ConversationRegister.serious);
+    });
+
+    test('a badly soured mood reads as serious', () {
+      expect(conversationRegister(_ctx(mood: -40)), ConversationRegister.serious);
+    });
+
+    test('low suspicion, settled mood, and a light topic reads as casual', () {
+      const ctx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 10, daysSinceReply: 0,
+        recentTones: [], memories: [], currentTopic: Topic.greeting,
+      );
+      expect(conversationRegister(ctx), ConversationRegister.casual);
+    });
+
+    test('low suspicion and settled mood but no topic still reads as casual', () {
+      expect(conversationRegister(_ctx(suspicion: 5)), ConversationRegister.casual);
+    });
+
+    test('low suspicion but a substantive topic falls back to moderate, not casual', () {
+      const ctx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 5, daysSinceReply: 0,
+        recentTones: [], memories: [], currentTopic: Topic.money,
+      );
+      expect(conversationRegister(ctx), ConversationRegister.moderate);
+    });
+  });
+
+  group('topicTierWeights (Phase 14)', () {
+    test('each register\'s weights sum to 1.0', () {
+      for (final register in ConversationRegister.values) {
+        final w = topicTierWeights(register);
+        expect(w.currentTopic + w.playerMentioned + w.tangent + w.initiative, closeTo(1.0, 1e-9), reason: '$register');
+      }
+    });
+
+    test('moderate matches the documented default split: 70/15/10/5', () {
+      final w = topicTierWeights(ConversationRegister.moderate);
+      expect(w.currentTopic, closeTo(0.70, 1e-9));
+      expect(w.playerMentioned, closeTo(0.15, 1e-9));
+      expect(w.tangent, closeTo(0.10, 1e-9));
+      expect(w.initiative, closeTo(0.05, 1e-9));
+    });
+
+    test('serious leaves far less room to wander than casual', () {
+      final serious = topicTierWeights(ConversationRegister.serious);
+      final casual = topicTierWeights(ConversationRegister.casual);
+      expect(serious.currentTopic, greaterThan(casual.currentTopic));
+      expect(serious.tangent, lessThan(casual.tangent));
+      expect(serious.initiative, lessThan(casual.initiative));
+    });
+  });
+
+  group('pickLine topic tiering (Phase 14)', () {
+    test('with no live topic, tiering is skipped and every eligible line stays in play', () {
+      final rng = Random(30);
+      const pool = [DialogueLine('a', topic: Topic.family), DialogueLine('b', topic: Topic.health), DialogueLine('c')];
+      final seen = <String>{};
+      for (var i = 0; i < 100; i++) {
+        seen.add(pickLine(rng, pool, _ctx(), currentDay: 1)!.text);
+      }
+      expect(seen, {'a', 'b', 'c'});
+    });
+
+    test('a live topic no longer guarantees only on-topic lines (the old 100% cutoff) — off-topic content is reachable too', () {
+      final rng = Random(31);
+      const pool = [DialogueLine('on_topic', topic: Topic.family), DialogueLine('tangent', topic: Topic.health)];
+      const ctx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], currentTopic: Topic.family,
+      );
+      final seen = <String>{};
+      for (var i = 0; i < 300; i++) {
+        seen.add(pickLine(rng, pool, ctx, currentDay: 1)!.text);
+      }
+      expect(seen, {'on_topic', 'tangent'});
+    });
+
+    test('on-topic content is drawn far more often than a tangent under the moderate default', () {
+      final rng = Random(32);
+      const pool = [DialogueLine('on_topic', topic: Topic.family), DialogueLine('tangent', topic: Topic.health)];
+      const ctx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], currentTopic: Topic.family,
+      );
+      var onTopicCount = 0;
+      const trials = 500;
+      for (var i = 0; i < trials; i++) {
+        if (pickLine(rng, pool, ctx, currentDay: 1)!.text == 'on_topic') onTopicCount++;
+      }
+      expect(onTopicCount / trials, greaterThan(0.6));
+    });
+
+    test('a serious register leaves so little room that a tangent-only pool still surfaces the tangent (never truly zero) but far less often than casual would', () {
+      const pool = [DialogueLine('on_topic', topic: Topic.family), DialogueLine('tangent', topic: Topic.health)];
+      const seriousCtx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 80, daysSinceReply: 0,
+        recentTones: [], memories: [], currentTopic: Topic.family,
+      );
+      const casualCtx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 5, daysSinceReply: 0,
+        recentTones: [], memories: [], currentTopic: Topic.greeting,
+      );
+      int tangentHits(DialogueContext ctx, int seed) {
+        final rng = Random(seed);
+        var hits = 0;
+        for (var i = 0; i < 1000; i++) {
+          if (pickLine(rng, pool, ctx, currentDay: 1)!.text == 'tangent') hits++;
+        }
+        return hits;
+      }
+
+      expect(conversationRegister(seriousCtx), ConversationRegister.serious);
+      expect(conversationRegister(casualCtx), ConversationRegister.casual);
+      expect(tangentHits(seriousCtx, 33), lessThan(tangentHits(casualCtx, 34)));
+    });
+
+    test('a player-mentioned (but not current) topic is reachable, distinct from a plain tangent', () {
+      final rng = Random(35);
+      const pool = [
+        DialogueLine('on_topic', topic: Topic.family),
+        DialogueLine('player_mentioned', topic: Topic.health),
+        DialogueLine('tangent', topic: Topic.money),
+      ];
+      const ctx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], currentTopic: Topic.family, playerTopics: {Topic.health},
+      );
+      final seen = <String>{};
+      for (var i = 0; i < 300; i++) {
+        seen.add(pickLine(rng, pool, ctx, currentDay: 1)!.text);
+      }
+      expect(seen, {'on_topic', 'player_mentioned', 'tangent'});
+    });
+  });
+
   group('intentMatch', () {
     test('a line with no intent tag is neutral (1.0)', () {
       expect(intentMatch(null, Intent.question), 1.0);
@@ -360,6 +627,230 @@ void main() {
 
     test('mismatched intent scores 0.3', () {
       expect(intentMatch(Intent.question, Intent.statement), closeTo(0.3, 1e-9));
+    });
+  });
+
+  group('Character personality (Phase 15)', () {
+    group('humorMatch', () {
+      test('neutral (1.0) for a non-joke line regardless of humor', () {
+        expect(humorMatch(false, 0), 1.0);
+        expect(humorMatch(false, 50), 1.0);
+        expect(humorMatch(false, 100), 1.0);
+      });
+
+      test('a joke line at neutral (50) humor is also neutral (1.0)', () {
+        expect(humorMatch(true, 50), closeTo(1.0, 1e-9));
+      });
+
+      test('high humor boosts a joke line above 1.0; low humor suppresses it below 1.0', () {
+        expect(humorMatch(true, 100), closeTo(1.5, 1e-9));
+        expect(humorMatch(true, 0), closeTo(0.5, 1e-9));
+      });
+    });
+
+    group('curiosityMatch', () {
+      test('neutral (1.0) for a non-question line regardless of curiosity', () {
+        expect(curiosityMatch(Intent.statement, 100), 1.0);
+        expect(curiosityMatch(null, 100), 1.0);
+      });
+
+      test('a question-tagged line scales with curiosity, 50 is neutral', () {
+        expect(curiosityMatch(Intent.question, 50), closeTo(1.0, 1e-9));
+        expect(curiosityMatch(Intent.question, 100), closeTo(1.5, 1e-9));
+        expect(curiosityMatch(Intent.question, 0), closeTo(0.5, 1e-9));
+      });
+    });
+
+    group('warmthMatch', () {
+      test('neutral (1.0) for a line not tagged ReplyTone.warm', () {
+        expect(warmthMatch(ReplyTone.cold, 100), 1.0);
+        expect(warmthMatch(null, 100), 1.0);
+      });
+
+      test('a warm-tagged line scales with warmth, 50 is neutral', () {
+        expect(warmthMatch(ReplyTone.warm, 50), closeTo(1.0, 1e-9));
+        expect(warmthMatch(ReplyTone.warm, 100), closeTo(1.5, 1e-9));
+        expect(warmthMatch(ReplyTone.warm, 0), closeTo(0.5, 1e-9));
+      });
+    });
+
+    group('patienceMatch', () {
+      test('neutral (1.0) for a non-cold line regardless of patience or repetition', () {
+        expect(patienceMatch(ReplyTone.warm, 0, 5), 1.0);
+      });
+
+      test('neutral (1.0) for a cold line below the repetition threshold (consecutiveActionCount < 2)', () {
+        expect(patienceMatch(ReplyTone.cold, 0, 1), 1.0);
+        expect(patienceMatch(ReplyTone.cold, 0, 0), 1.0);
+      });
+
+      test('once repetition is established, LOW patience boosts the cold line (inverted scale)', () {
+        expect(patienceMatch(ReplyTone.cold, 0, 2), closeTo(1.5, 1e-9));
+      });
+
+      test('once repetition is established, HIGH patience suppresses the cold line', () {
+        expect(patienceMatch(ReplyTone.cold, 100, 2), closeTo(0.5, 1e-9));
+      });
+
+      test('neutral patience (50) at the repetition threshold is a no-op', () {
+        expect(patienceMatch(ReplyTone.cold, 50, 2), closeTo(1.0, 1e-9));
+      });
+    });
+
+    group('styleMatch (Phase 17)', () {
+      test('neutral (1.0) for an unstyled line regardless of personality', () {
+        expect(styleMatch(null, const CharacterPersonality(warmth: 100, humor: 100, strictness: 100, talkativeness: 0)), 1.0);
+      });
+
+      test('warm/affectionate scale with warmth, 50 is neutral', () {
+        expect(styleMatch(DialogueStyle.warm, const CharacterPersonality(warmth: 50)), closeTo(1.0, 1e-9));
+        expect(styleMatch(DialogueStyle.warm, const CharacterPersonality(warmth: 100)), closeTo(1.5, 1e-9));
+        expect(styleMatch(DialogueStyle.affectionate, const CharacterPersonality(warmth: 0)), closeTo(0.5, 1e-9));
+      });
+
+      test('funny/playful scale with humor, 50 is neutral', () {
+        expect(styleMatch(DialogueStyle.funny, const CharacterPersonality(humor: 50)), closeTo(1.0, 1e-9));
+        expect(styleMatch(DialogueStyle.playful, const CharacterPersonality(humor: 100)), closeTo(1.5, 1e-9));
+        expect(styleMatch(DialogueStyle.funny, const CharacterPersonality(humor: 0)), closeTo(0.5, 1e-9));
+      });
+
+      test('serious scales UP with strictness; casual scales up with its inverse', () {
+        expect(styleMatch(DialogueStyle.serious, const CharacterPersonality(strictness: 100)), closeTo(1.5, 1e-9));
+        expect(styleMatch(DialogueStyle.serious, const CharacterPersonality(strictness: 0)), closeTo(0.5, 1e-9));
+        expect(styleMatch(DialogueStyle.casual, const CharacterPersonality(strictness: 0)), closeTo(1.5, 1e-9));
+        expect(styleMatch(DialogueStyle.casual, const CharacterPersonality(strictness: 100)), closeTo(0.5, 1e-9));
+      });
+
+      test('short scales up with the inverse of talkativeness', () {
+        expect(styleMatch(DialogueStyle.short, const CharacterPersonality(talkativeness: 0)), closeTo(1.5, 1e-9));
+        expect(styleMatch(DialogueStyle.short, const CharacterPersonality(talkativeness: 100)), closeTo(0.5, 1e-9));
+      });
+    });
+
+    test('kNeutralPersonality makes every personality multiplier a no-op (1.0)', () {
+      expect(humorMatch(true, kNeutralPersonality.humor), 1.0);
+      expect(curiosityMatch(Intent.question, kNeutralPersonality.curiosity), 1.0);
+      expect(warmthMatch(ReplyTone.warm, kNeutralPersonality.warmth), 1.0);
+      expect(patienceMatch(ReplyTone.cold, kNeutralPersonality.patience, 5), 1.0);
+      expect(styleMatch(DialogueStyle.warm, kNeutralPersonality), 1.0);
+    });
+
+    test('pickLine draws a short-styled line far more often for a low-talkativeness personality than a high-talkativeness one', () {
+      const pool = [DialogueLine('short one', style: DialogueStyle.short, weight: 1.0), DialogueLine('plain', weight: 1.0)];
+      const terseCtx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], personality: CharacterPersonality(talkativeness: 0),
+      );
+      const chattyCtx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], personality: CharacterPersonality(talkativeness: 100),
+      );
+      int shortHits(DialogueContext ctx, int seed) {
+        final rng = Random(seed);
+        var hits = 0;
+        for (var i = 0; i < 500; i++) {
+          if (pickLine(rng, pool, ctx, currentDay: 1)!.text == 'short one') hits++;
+        }
+        return hits;
+      }
+
+      expect(shortHits(terseCtx, 42), greaterThan(shortHits(chattyCtx, 43)));
+    });
+
+    test('pickLine draws an isJoke line far more often for a high-humor personality than a low-humor one', () {
+      const pool = [DialogueLine('joke', isJoke: true, weight: 1.0), DialogueLine('plain', weight: 1.0)];
+      const funnyCtx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], personality: CharacterPersonality(humor: 100),
+      );
+      const seriousCtx = DialogueContext(
+        mood: 0, closeness: 50, trust: 50, suspicion: 0, daysSinceReply: 0,
+        recentTones: [], memories: [], personality: CharacterPersonality(humor: 0),
+      );
+      int jokeHits(DialogueContext ctx, int seed) {
+        final rng = Random(seed);
+        var hits = 0;
+        for (var i = 0; i < 500; i++) {
+          if (pickLine(rng, pool, ctx, currentDay: 1)!.text == 'joke') hits++;
+        }
+        return hits;
+      }
+
+      expect(jokeHits(funnyCtx, 40), greaterThan(jokeHits(seriousCtx, 41)));
+    });
+  });
+
+  group('classifyDepth (Phase 16)', () {
+    test('isVulnerableDisclosure forces vulnerable regardless of topic/intent/intensity', () {
+      expect(
+        classifyDepth(topic: null, intensity: 0, isVulnerableDisclosure: true),
+        ConversationDepth.vulnerable,
+      );
+      expect(
+        classifyDepth(conversationIntent: ConversationIntent.confront, topic: Topic.suspicion, intensity: 1.0, isVulnerableDisclosure: true),
+        ConversationDepth.vulnerable,
+      );
+    });
+
+    test('confront/questionLoyalty classify as confrontation', () {
+      expect(classifyDepth(conversationIntent: ConversationIntent.confront, topic: Topic.suspicion, intensity: 0.9), ConversationDepth.confrontation);
+      expect(classifyDepth(conversationIntent: ConversationIntent.questionLoyalty, topic: Topic.suspicion, intensity: 0.9), ConversationDepth.confrontation);
+    });
+
+    test('no topic, or Topic.greeting, is always smallTalk regardless of intensity', () {
+      expect(classifyDepth(topic: null, intensity: 1.0), ConversationDepth.smallTalk);
+      expect(classifyDepth(topic: Topic.greeting, intensity: 1.0), ConversationDepth.smallTalk);
+    });
+
+    test('"How\'s work?" — a light topic at ordinary intensity -> casual', () {
+      expect(classifyDepth(topic: Topic.plans, intensity: 0.4), ConversationDepth.casual);
+    });
+
+    test('"I\'m having money problems." — a real topic at moderate intensity -> personal', () {
+      expect(classifyDepth(topic: Topic.money, intensity: 0.6), ConversationDepth.personal);
+    });
+
+    test('"I\'m scared I\'m going to lose my apartment." — the same kind of topic delivered at real urgency -> serious', () {
+      expect(classifyDepth(topic: Topic.money, intensity: 0.8), ConversationDepth.serious);
+    });
+
+    test('intensity thresholds are exact: 0.75 is serious, just under is personal; 0.45 is personal, just under is casual', () {
+      expect(classifyDepth(topic: Topic.money, intensity: 0.75), ConversationDepth.serious);
+      expect(classifyDepth(topic: Topic.money, intensity: 0.74), ConversationDepth.personal);
+      expect(classifyDepth(topic: Topic.money, intensity: 0.45), ConversationDepth.personal);
+      expect(classifyDepth(topic: Topic.money, intensity: 0.44), ConversationDepth.casual);
+    });
+  });
+
+  group('advanceDepth (Phase 16)', () {
+    test('escalates immediately to a deeper turnDepth', () {
+      expect(advanceDepth(ConversationDepth.smallTalk, ConversationDepth.vulnerable), ConversationDepth.vulnerable);
+      expect(advanceDepth(ConversationDepth.casual, ConversationDepth.serious), ConversationDepth.serious);
+    });
+
+    test('holds steady when turnDepth matches the current depth', () {
+      expect(advanceDepth(ConversationDepth.personal, ConversationDepth.personal), ConversationDepth.personal);
+    });
+
+    test('de-escalates only one step at a time, not straight down to turnDepth', () {
+      expect(advanceDepth(ConversationDepth.confrontation, ConversationDepth.smallTalk), ConversationDepth.vulnerable);
+    });
+
+    test('repeated calls at a shallow turnDepth eventually settle at turnDepth, one step per call', () {
+      var depth = ConversationDepth.confrontation;
+      const steps = <ConversationDepth>[
+        ConversationDepth.vulnerable,
+        ConversationDepth.serious,
+        ConversationDepth.personal,
+        ConversationDepth.casual,
+        ConversationDepth.smallTalk,
+      ];
+      for (final expected in steps) {
+        depth = advanceDepth(depth, ConversationDepth.smallTalk);
+        expect(depth, expected);
+      }
+      // Settled — further calls at the same shallow turnDepth are a no-op.
+      expect(advanceDepth(depth, ConversationDepth.smallTalk), ConversationDepth.smallTalk);
     });
   });
 
@@ -439,6 +930,69 @@ void main() {
 
     test('suppressed (0.5) when nothing was actually pending/answered', () {
       expect(answeredQuestionMatch(true, false), 0.5);
+    });
+  });
+
+  group('recallMatch (Phase 11 importance scaling)', () {
+    ConversationEvent event({
+      ConversationIntent? intent,
+      required int turn,
+      MemoryImportance importance = MemoryImportance.medium,
+    }) =>
+        ConversationEvent(
+          intent: intent,
+          tone: ReplyTone.honest,
+          intensity: 0.5,
+          fromMe: true,
+          turn: turn,
+          day: 1,
+          level: 1,
+          importance: importance,
+        );
+
+    test('neutral (1.0) for a line with neither requiresRecentIntent nor forbidsRecentIntent', () {
+      expect(recallMatch(const DialogueLine('x'), const [], 10), 1.0);
+    });
+
+    test('suppressed (0.2) when requiresRecentIntent has no match in the window', () {
+      const line = DialogueLine('x', requiresRecentIntent: ConversationIntent.apologize);
+      expect(recallMatch(line, const [], 10), 0.2);
+    });
+
+    test("boost scales with the matched event's importance: low 2.0, medium 4.0, high 7.0, critical 10.0", () {
+      const line = DialogueLine('x', requiresRecentIntent: ConversationIntent.apologize);
+      for (final entry in const {
+        MemoryImportance.low: 2.0,
+        MemoryImportance.medium: 4.0,
+        MemoryImportance.high: 7.0,
+        MemoryImportance.critical: 10.0,
+      }.entries) {
+        final recent = [event(intent: ConversationIntent.apologize, turn: 9, importance: entry.key)];
+        expect(recallMatch(line, recent, 10), entry.value, reason: '${entry.key}');
+      }
+    });
+
+    test('the strongest matching importance wins when more than one qualifying turn is in window', () {
+      const line = DialogueLine('x', requiresRecentIntent: ConversationIntent.apologize);
+      final recent = [
+        event(intent: ConversationIntent.apologize, turn: 8, importance: MemoryImportance.low),
+        event(intent: ConversationIntent.apologize, turn: 9, importance: MemoryImportance.critical),
+      ];
+      expect(recallMatch(line, recent, 10), 10.0);
+    });
+
+    test('forbidsRecentIntent suppresses flatly (0.2) regardless of the matched event\'s importance', () {
+      const line = DialogueLine('x', forbidsRecentIntent: ConversationIntent.insult);
+      final recent = [event(intent: ConversationIntent.insult, turn: 9, importance: MemoryImportance.critical)];
+      expect(recallMatch(line, recent, 10), 0.2);
+    });
+
+    test('recallWithinTurns bounds the window regardless of importance', () {
+      const line = DialogueLine('x', requiresRecentIntent: ConversationIntent.apologize, recallWithinTurns: 2);
+      final tooOld = [event(intent: ConversationIntent.apologize, turn: 5, importance: MemoryImportance.critical)];
+      expect(recallMatch(line, tooOld, 10), 0.2); // 10 - 5 = 5 > 2, out of window
+      final inWindow = [event(intent: ConversationIntent.apologize, turn: 9, importance: MemoryImportance.high)];
+      expect(recallMatch(line, inWindow, 10), 7.0); // 10 - 9 = 1 <= 2
     });
   });
 
@@ -937,6 +1491,35 @@ void main() {
         recordMemory(memories, MemoryEvent(MemoryKind.firstWarmReply, i), cap: 3);
       }
       expect(memories.length, 3);
+    });
+  });
+
+  group('isOverdue (Phase 10)', () {
+    PendingInteraction interaction({int? deadlineTurn, bool resolved = false}) => PendingInteraction(
+          type: InteractionType.promise,
+          createdTurn: 0,
+          deadlineTurn: deadlineTurn,
+          resolved: resolved,
+        );
+
+    test('no deadline set -> never overdue', () {
+      expect(isOverdue(interaction(deadlineTurn: null), 100), isFalse);
+    });
+
+    test('already resolved -> never overdue, even past its deadline', () {
+      expect(isOverdue(interaction(deadlineTurn: 5, resolved: true), 100), isFalse);
+    });
+
+    test('current turn before the deadline -> not overdue', () {
+      expect(isOverdue(interaction(deadlineTurn: 10), 5), isFalse);
+    });
+
+    test('current turn exactly on the deadline -> not overdue yet (strict >)', () {
+      expect(isOverdue(interaction(deadlineTurn: 10), 10), isFalse);
+    });
+
+    test('current turn past the deadline -> overdue', () {
+      expect(isOverdue(interaction(deadlineTurn: 10), 11), isTrue);
     });
   });
 
