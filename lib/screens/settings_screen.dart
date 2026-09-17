@@ -37,13 +37,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
           padding: const EdgeInsets.all(16),
           child: Column(children: [
             KVRow('Level', Text('${g.level}', style: AppText.mono(size: 14, color: c.ink))),
+            if (g.careerPath != null)
+              KVRow('Career path', Text(kCareerPaths.firstWhere((p) => p.id == g.careerPath).label, style: AppText.mono(size: 14, color: c.ink))),
             KVRow('Day', Text(g.dayLabel, style: AppText.mono(size: 14, color: c.ink))),
             KVRow('Cash on hand', Text(money(g.cash), style: AppText.mono(size: 14, color: c.ink))),
             KVRow('Laundered', Text(money(g.cleanBalance), style: AppText.mono(size: 14, color: c.ink))),
             KVRow('Police heat', Text(riskLabel(g.policeHeat), style: AppText.mono(size: 14, color: riskColor(c, g.policeHeat)))),
             KVRow('Cartel suspicion', Text(riskLabel(g.cartelSuspicion), style: AppText.mono(size: 14, color: riskColor(c, g.cartelSuspicion)))),
+            KVRow('Rival heat (${g.rivalCrewName})', Text(riskLabel(g.rivalPressure), style: AppText.mono(size: 14, color: riskColor(c, g.rivalPressure)))),
           ]),
         ),
+        if (g.rivalPressure > 0) ...[
+          const SizedBox(height: 14),
+          AppButton(
+            kind: BtnKind.ghost,
+            full: true,
+            height: 48,
+            onTap: g.cash > 0 ? g.payOffRival : null,
+            child: Text('Pay off ${g.rivalCrewName}'),
+          ),
+        ],
         const SizedBox(height: 14),
         AppButton(
           kind: BtnKind.ghost,
@@ -52,6 +65,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onTap: () => showLevelTutorialDialog(context, g.level),
           child: const Text('How to play'),
         ),
+        const SizedBox(height: 14),
+        const SectionHead('Legacy'),
+        AppCard(
+          padding: const EdgeInsets.all(16),
+          child: Column(children: [
+            KVRow('Careers started', Text('${g.legacyRuns + 1}', style: AppText.mono(size: 14, color: c.ink))),
+            KVRow('Best level reached', Text('${g.peakLevelEver}', style: AppText.mono(size: 14, color: c.ink))),
+          ]),
+        ),
+        if (g.level > 1) ...[
+          const SizedBox(height: 14),
+          AppButton(
+            kind: BtnKind.ghost,
+            full: true,
+            height: 48,
+            onTap: g.startNewCareer,
+            child: const Text('Start a new career'),
+          ),
+        ],
         const SizedBox(height: 14),
         const SectionHead('Danger zone'),
         AppButton(

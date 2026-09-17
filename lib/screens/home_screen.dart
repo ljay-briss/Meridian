@@ -38,6 +38,8 @@ class HomeScreen extends StatelessWidget {
               Text('LEVEL 1 — PLAZA LOOKOUT', style: AppText.sans(size: 10, weight: FontWeight.w500, color: c.ink, spacing: 1.6)),
               const SizedBox(height: 14),
               const LevelProgressBar(),
+              const SizedBox(height: 18),
+              MeterBar(label: 'Rival heat', value: g.rivalPressure, color: riskColor(c, g.rivalPressure)),
               const SizedBox(height: 22),
               Text('BALANCE', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink, spacing: 1.2)),
               const SizedBox(height: 6),
@@ -99,6 +101,10 @@ class HomeScreen extends StatelessWidget {
                   decoration: BoxDecoration(color: c.warn.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
                   child: Text(g.lastWarning!, style: AppText.sans(size: 12.5, weight: FontWeight.w600, color: c.warn, height: 1.4)),
                 ),
+              ],
+              if (g.sideHustleAvailable) ...[
+                const SizedBox(height: 14),
+                const SideHustleCard(),
               ],
               const SizedBox(height: 22),
               if (sighting != null)

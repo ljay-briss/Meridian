@@ -23,6 +23,8 @@ class CollectorScreen extends StatelessWidget {
         ]),
         const SizedBox(height: 14),
         const LevelProgressBar(),
+        const SizedBox(height: 14),
+        MeterBar(label: 'Rival heat', value: g.rivalPressure, color: riskColor(c, g.rivalPressure)),
         const SizedBox(height: 18),
         Text('BALANCE', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink, spacing: 1.2)),
         const SizedBox(height: 6),
@@ -31,6 +33,10 @@ class CollectorScreen extends StatelessWidget {
         Text('collected ${money(g.collectedTotal)} / ${money(g.expectedTotal)} owed this week',
             style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink)),
         Container(height: 1, color: c.lineSoft, margin: const EdgeInsets.symmetric(vertical: 22)),
+        if (g.sideHustleAvailable) ...[
+          const SideHustleCard(),
+          const SizedBox(height: 14),
+        ],
         for (final target in kCollectionRoute) ...[
           _TargetCard(target: target),
           const SizedBox(height: 10),

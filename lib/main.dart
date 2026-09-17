@@ -63,6 +63,7 @@ class _RootState extends State<_Root> {
   bool _promotionShowing = false;
   bool _attachmentShowing = false;
   bool _tutorialBannerShowing = false;
+  bool _rivalWarningShowing = false;
 
   @override
   Widget build(BuildContext context) {
@@ -74,6 +75,7 @@ class _RootState extends State<_Root> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _maybePromote(context, g);
       _maybeShowAttachmentWarning(context, g);
+      _maybeShowRivalWarning(context, g);
       _maybeShowTutorialBanner(context, g);
     });
 
@@ -182,6 +184,63 @@ class _RootState extends State<_Root> {
     ).then((_) => _attachmentShowing = false);
   }
 
+  void _maybeShowRivalWarning(BuildContext context, CareerController g) {
+    if (_rivalWarningShowing || g.pendingRivalWarning == null) return;
+    _rivalWarningShowing = true;
+    final c = AppColors.of(context);
+    final warning = g.pendingRivalWarning!;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18), side: BorderSide(color: c.line)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('${g.rivalCrewName} is a problem', style: AppText.sans(size: 18, weight: FontWeight.w700, color: c.ink)),
+            const SizedBox(height: 10),
+            Text(warning, style: AppText.sans(size: 13.5, weight: FontWeight.w500, color: c.inkSoft, height: 1.5)),
+            const SizedBox(height: 18),
+            AppButton(
+              kind: BtnKind.ghost,
+              full: true,
+              height: 48,
+              onTap: () {
+                g.resolveRivalWarning('pay');
+                Navigator.pop(ctx);
+              },
+              child: const Text('Pay them off'),
+            ),
+            const SizedBox(height: 10),
+            AppButton(
+              kind: BtnKind.danger,
+              full: true,
+              height: 48,
+              onTap: () {
+                g.resolveRivalWarning('retaliate');
+                Navigator.pop(ctx);
+              },
+              child: const Text('Send a message back'),
+            ),
+            const SizedBox(height: 10),
+            AppButton(
+              kind: BtnKind.ghost,
+              full: true,
+              height: 48,
+              onTap: () {
+                g.resolveRivalWarning('ignore');
+                Navigator.pop(ctx);
+              },
+              child: const Text('Ignore it'),
+            ),
+          ]),
+        ),
+      ),
+    ).then((_) => _rivalWarningShowing = false);
+  }
+
   void _maybePromote(BuildContext context, CareerController g) {
     if (_promotionShowing || !g.promotionAvailable) return;
     _promotionShowing = true;
@@ -201,15 +260,37 @@ class _RootState extends State<_Root> {
             const SizedBox(height: 10),
             Text(_promotionText(fromLevel), style: AppText.sans(size: 13.5, weight: FontWeight.w500, color: c.inkSoft, height: 1.5)),
             const SizedBox(height: 18),
-            AppButton(
-              full: true,
-              height: 48,
-              onTap: () {
-                g.acceptPromotion();
-                Navigator.pop(ctx);
-              },
-              child: const Text('Take the job'),
-            ),
+            if (fromLevel == 3)
+              for (final path in kCareerPaths) ...[
+                AppButton(
+                  kind: BtnKind.ghost,
+                  full: true,
+                  height: null,
+                  onTap: () {
+                    g.acceptPromotion(path: path.id);
+                    Navigator.pop(ctx);
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(path.label, style: AppText.sans(size: 14, weight: FontWeight.w700, color: c.ink)),
+                      const SizedBox(height: 4),
+                      Text(path.description, style: AppText.sans(size: 12, weight: FontWeight.w500, color: c.inkSoft, height: 1.4)),
+                    ]),
+                  ),
+                ),
+                if (path != kCareerPaths.last) const SizedBox(height: 10),
+              ]
+            else
+              AppButton(
+                full: true,
+                height: 48,
+                onTap: () {
+                  g.acceptPromotion();
+                  Navigator.pop(ctx);
+                },
+                child: const Text('Take the job'),
+              ),
           ]),
         ),
       ),

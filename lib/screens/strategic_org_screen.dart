@@ -91,6 +91,8 @@ class StrategicOrgScreen extends StatelessWidget {
         AppCard(
           child: Column(children: [
             MeterBar(label: 'Cartel suspicion of you', value: g.cartelSuspicion, color: riskColor(c, g.cartelSuspicion)),
+            const SizedBox(height: 14),
+            MeterBar(label: 'Rival heat', value: g.rivalPressure, color: riskColor(c, g.rivalPressure)),
           ]),
         ),
       ],

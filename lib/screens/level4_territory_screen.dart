@@ -56,6 +56,8 @@ class Level4TerritoryScreen extends StatelessWidget {
             MeterBar(label: 'Police heat', value: g.policeHeat, color: riskColor(c, g.policeHeat)),
             const SizedBox(height: 14),
             MeterBar(label: 'Cartel suspicion', value: g.cartelSuspicion, color: riskColor(c, g.cartelSuspicion)),
+            const SizedBox(height: 14),
+            MeterBar(label: 'Rival heat', value: g.rivalPressure, color: riskColor(c, g.rivalPressure)),
           ]),
         ),
       ],

@@ -220,6 +220,32 @@ class LevelProgressBar extends StatelessWidget {
   }
 }
 
+/// "Something to do while this settles" card — shown on a level's home
+/// screen whenever [CareerController.sideHustleAvailable] is true (i.e.
+/// during that level's built-in pacing gap), across every level.
+/// Self-contained: reads and calls the controller directly.
+class SideHustleCard extends StatelessWidget {
+  const SideHustleCard({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final g = AppScope.of(context);
+    final c = AppColors.of(context);
+    return AppCard(
+      child: Row(children: [
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const TLabel('Side hustle'),
+            const SizedBox(height: 4),
+            Text('Something on the side while this settles.', style: AppText.sans(size: 12.5, weight: FontWeight.w500, color: c.inkSoft)),
+          ]),
+        ),
+        const SizedBox(width: 12),
+        AppButton(kind: BtnKind.ghost, onTap: g.runSideHustle, child: const Text('Run it')),
+      ]),
+    );
+  }
+}
+
 /// Key/value row used inside cards & sheets.
 class KVRow extends StatelessWidget {
   final String label;

@@ -34,6 +34,8 @@ class TransportScreen extends StatelessWidget {
         ]),
         const SizedBox(height: 14),
         const LevelProgressBar(),
+        const SizedBox(height: 14),
+        MeterBar(label: 'Rival heat', value: g.rivalPressure, color: riskColor(c, g.rivalPressure)),
         const SizedBox(height: 18),
         Text('BALANCE', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink, spacing: 1.2)),
         const SizedBox(height: 6),
@@ -54,6 +56,10 @@ class TransportScreen extends StatelessWidget {
           Text('The truck is loaded. Eight hours to the crossing.', style: AppText.sans(size: 15, weight: FontWeight.w500, color: c.ink, height: 1.6)),
           const SizedBox(height: 20),
           AppButton(kind: BtnKind.dark, full: true, height: 50, onTap: g.beginRun, child: const Text('Begin run')),
+          if (g.sideHustleAvailable) ...[
+            const SizedBox(height: 14),
+            const SideHustleCard(),
+          ],
         ] else ...[
           Builder(builder: (context) {
             final checkpoint = kCheckpoints[stage];

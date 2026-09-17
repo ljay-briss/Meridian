@@ -19,6 +19,10 @@ class GameOverScreen extends StatelessWidget {
             Text(g.arrested ? 'ARRESTED' : 'DEAD', style: AppText.sans(size: 34, weight: FontWeight.w700, color: c.neg, spacing: -0.5)),
             const SizedBox(height: 14),
             Text('Level ${g.level} — day ${g.day}', style: AppText.sans(size: 12, weight: FontWeight.w600, color: c.inkFaint, spacing: 0.8)),
+            if (g.peakLevelEver > 1) ...[
+              const SizedBox(height: 4),
+              Text('Best career: Level ${g.peakLevelEver}', style: AppText.sans(size: 12, weight: FontWeight.w600, color: c.inkFaint, spacing: 0.8)),
+            ],
             const SizedBox(height: 18),
             Text(g.gameOverReason, style: AppText.sans(size: 15.5, weight: FontWeight.w500, color: c.ink, height: 1.6)),
             if (g.arrested && g.level >= 7) ...[
@@ -34,6 +38,10 @@ class GameOverScreen extends StatelessWidget {
             ],
             const SizedBox(height: 28),
             AppButton(kind: BtnKind.dark, full: true, height: 50, onTap: g.restart, child: const Text('Start over')),
+            if (g.level > 1) ...[
+              const SizedBox(height: 10),
+              AppButton(kind: BtnKind.ghost, full: true, height: 50, onTap: g.startNewCareer, child: const Text('Start a new career')),
+            ],
           ]),
         ),
       ),

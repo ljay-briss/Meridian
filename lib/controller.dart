@@ -10,6 +10,9 @@ import 'data.dart';
 
 double _clamp01to100(double v) => v.clamp(0, 100).toDouble();
 
+/// Picks the crew name that flavors every rival-pressure event for the run.
+String _pickRivalCrewName(Random rng) => kRivalCrewNames[rng.nextInt(kRivalCrewNames.length)];
+
 /// Picks a random line from [pool], avoiding [avoid] when the pool has more
 /// than one option — keeps a contact from sending the same line twice in a row.
 String _pickVariant(Random rng, List<String> pool, String? avoid) {
@@ -39,6 +42,13 @@ class CareerController extends ChangeNotifier {
   static const int kStrategicGoodCyclesToPromote = 4;
   static const int kStrategicCyclesToPromote = 4;
 
+  // A rival crew's hostility — separate from police heat / cartel suspicion,
+  // this is a third pressure track that a specific named crew builds against
+  // you across the whole run (see kRivalCrewNames in data.dart).
+  static const double kRivalWarningThreshold = 60.0;
+  static const double kRivalLethalThreshold = 95.0;
+  static const double kRivalDeathOdds = 0.35;
+
   // ── shared state ──
   int day = 1;
   int level = 1;
@@ -46,6 +56,25 @@ class CareerController extends ChangeNotifier {
   int cleanBalance = 0;
   double policeHeat = 0;
   double cartelSuspicion = 0;
+  double rivalPressure = 0;
+  late String rivalCrewName;
+  String? pendingRivalWarning;
+  bool _sideHustleUsedThisWait = false;
+
+  // Chosen once, at the Level 3->4 promotion fork (see acceptPromotion) —
+  // deliberately not reset in restart(): dying past Level 4 restarts you at
+  // that level with the path you already picked, and dying before Level 4
+  // correctly leaves this null until you reach the fork again.
+  String? careerPath;
+  double get _pathIncomeMultiplier => careerPath == 'boss' ? 1.15 : 1.0;
+
+  // Legacy — tracked across every career this session, never reset by
+  // restart() or devJumpToLevel(). See startNewCareer().
+  int legacyRuns = 0;
+  int peakLevelEver = 1;
+  double get _pathNegotiationCostMultiplier =>
+      careerPath == 'fixer' ? 0.5 : (careerPath == 'muscle' ? 1.5 : 1.0);
+
   bool gameOver = false;
   bool arrested = false;
   String gameOverReason = '';
@@ -216,6 +245,7 @@ class CareerController extends ChangeNotifier {
   /// [random] is injectable purely for deterministic tests; real gameplay
   /// always uses the default (unseeded) generator.
   CareerController({Random? random}) : _rng = random ?? Random() {
+    rivalCrewName = _pickRivalCrewName(_rng);
     _reinitLevel(1);
   }
 
@@ -238,7 +268,88 @@ class CareerController extends ChangeNotifier {
       _die('They found out. It wasn\'t quick.');
       return true;
     }
+    if (rivalPressure >= kRivalLethalThreshold && _rng.nextDouble() < kRivalDeathOdds) {
+      _die('$rivalCrewName found you before the cops ever needed to.');
+      return true;
+    }
+    _maybeTriggerRivalWarning();
     return false;
+  }
+
+  /// Once rival pressure climbs high enough, an informant tip lands in the
+  /// handler thread and the player gets a forced choice on how to answer it
+  /// (see [resolveRivalWarning]) — same request/resolve shape as the boss's
+  /// attachment warning, just for a different pressure track.
+  void _maybeTriggerRivalWarning() {
+    if (rivalPressure < kRivalWarningThreshold || pendingRivalWarning != null) return;
+    pendingRivalWarning = '$rivalCrewName know your name now. Word is they\'re deciding what to do about it.';
+    _announce('handler', 'Heard $rivalCrewName has been asking questions about you. Watch yourself.');
+  }
+
+  void resolveRivalWarning(String choice) {
+    if (pendingRivalWarning == null) return;
+    switch (choice) {
+      case 'pay':
+        final cost = max(1000, (cash * 0.1).round());
+        if (cash < cost) return;
+        cash -= cost;
+        rivalPressure = _clamp01to100(rivalPressure - 30);
+        break;
+      case 'retaliate':
+        cash = (cash - 500).clamp(0, 1 << 30);
+        policeHeat = _clamp01to100(policeHeat + 10);
+        cartelSuspicion = _clamp01to100(cartelSuspicion + 5);
+        rivalPressure = _clamp01to100(rivalPressure - 20);
+        break;
+      default: // 'ignore'
+        break;
+    }
+    pendingRivalWarning = null;
+    notifyListeners();
+  }
+
+  /// Proactive defuse: pay a slice of cash on hand to bring rival pressure
+  /// down before it ever reaches a forced warning.
+  void payOffRival() {
+    if (rivalPressure <= 0) return;
+    final cost = max(1000, (cash * 0.08).round());
+    if (cash < cost) return;
+    cash -= cost;
+    rivalPressure = _clamp01to100(rivalPressure - 25);
+    cartelSuspicion = _clamp01to100(cartelSuspicion + 2);
+    notifyListeners();
+  }
+
+  /// True while the current level is sitting in one of its built-in waiting
+  /// moments (a pacing gap, or the idle stretch before the next sighting/run)
+  /// and the side hustle hasn't already been run during this particular
+  /// wait — see the `_sideHustleUsedThisWait` reset points scattered across
+  /// each level's gap-start / waiting-state code.
+  bool get sideHustleAvailable {
+    if (gameOver) return false;
+    final waiting = switch (level) {
+      1 => sighting == null,
+      2 => runStage == null,
+      3 => collectorBusy,
+      4 => level4Busy,
+      _ => strategicBusy,
+    };
+    return waiting && !_sideHustleUsedThisWait;
+  }
+
+  /// A quick, low-stakes side racket the player can run once per waiting
+  /// window — turns the pacing gaps into a small decision instead of dead
+  /// air. Odds favor the player; a miss only costs police heat, since
+  /// rivalPressure is reserved for genuinely rival-flavored events.
+  void runSideHustle() {
+    if (!sideHustleAvailable) return;
+    _sideHustleUsedThisWait = true;
+    if (_rng.nextDouble() < 0.7) {
+      cash += kSideHustlePayout[level] ?? 0;
+    } else {
+      policeHeat = _clamp01to100(policeHeat + 6);
+    }
+    notifyListeners();
   }
 
   void _die(String reason, {bool arrested = false}) {
@@ -251,6 +362,7 @@ class CareerController extends ChangeNotifier {
   /// Dispatches to the right level's init routine. Shared by [restart],
   /// [devJumpToLevel], and [acceptPromotion] so they can't drift apart.
   void _reinitLevel(int lvl) {
+    if (lvl > peakLevelEver) peakLevelEver = lvl;
     switch (lvl) {
       case 1:
         _initLevel1();
@@ -295,6 +407,10 @@ class CareerController extends ChangeNotifier {
     cleanBalance = 0;
     policeHeat = 0;
     cartelSuspicion = 0;
+    rivalPressure = 0;
+    rivalCrewName = _pickRivalCrewName(_rng);
+    pendingRivalWarning = null;
+    _sideHustleUsedThisWait = false;
     _relationshipTickCount = 0;
     threads.updateAll((key, value) => []);
     relationships.updateAll((key, value) => RelationshipState());
@@ -309,6 +425,19 @@ class CareerController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Retires the current career and starts a brand new one from Level 1.
+  /// Unlike [restart] (same level, after a death — a "retry"), this is a
+  /// deliberate choice to go again, and it's the only place a legacy perk
+  /// carries forward: legacyRuns/peakLevelEver are never reset by restart().
+  void startNewCareer() {
+    legacyRuns += 1;
+    level = 1;
+    restart(); // full state reset + _reinitLevel(1)
+    cash = 100 * legacyRuns; // deliberately minor — flavor, not a head start
+    _announce('handler', 'Word travels. This isn\'t your first rodeo — that\'s worth something.');
+    notifyListeners();
+  }
+
   /// Dev/testing helper: jump straight to a level with fresh state for that level.
   void devJumpToLevel(int lvl) {
     gameOver = false;
@@ -318,8 +447,9 @@ class CareerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void acceptPromotion() {
+  void acceptPromotion({String? path}) {
     if (!promotionAvailable) return;
+    if (level == 3 && path != null) careerPath = path;
     promotionAvailable = false;
     _reinitLevel(level + 1);
     notifyListeners();
@@ -446,6 +576,9 @@ class CareerController extends ChangeNotifier {
       }
       policeHeat = _clamp01to100(policeHeat + 6);
       cartelSuspicion = _clamp01to100(cartelSuspicion + 6);
+      if (sighting!.kind == SightingKind.rival) {
+        rivalPressure = _clamp01to100(rivalPressure + 8);
+      }
       _strike(wrongReason);
       if (gameOver) return;
     }
@@ -459,6 +592,7 @@ class CareerController extends ChangeNotifier {
     }
     // The road sits quiet for a stretch before the next thing worth reporting rolls by.
     sighting = null;
+    _sideHustleUsedThisWait = false;
     notifyListeners();
     _sightingGapTimer?.cancel();
     _sightingGapTimer = Timer(const Duration(seconds: sightingGapSeconds), () {
@@ -516,6 +650,7 @@ class CareerController extends ChangeNotifier {
     successfulRuns = 0;
     transportStrikes = 0;
     lastWarning = null;
+    _sideHustleUsedThisWait = false;
     _announce('handler', 'New job. Get the product across. Eight hours, don\'t stop for anyone.');
   }
 
@@ -546,10 +681,14 @@ class CareerController extends ChangeNotifier {
   void _resolveRun() {
     final caught = _rng.nextDouble() < runRisk.clamp(0, 0.85);
     runStage = null;
+    _sideHustleUsedThisWait = false;
     if (caught) {
       transportStrikes += 1;
       policeHeat = _clamp01to100(policeHeat + 15);
       recentStoryEvent = 'close_call';
+      if (_rng.nextDouble() < 0.4) {
+        rivalPressure = _clamp01to100(rivalPressure + 10);
+      }
       if (transportStrikes >= 2) {
         _die('Stopped at the crossing. Twenty years, no parole hearing for a while.', arrested: true);
         return;
@@ -602,6 +741,7 @@ class CareerController extends ChangeNotifier {
   // clears, so a week can't be cleared in a handful of instant taps.
   void _startCollectorGap() {
     collectorBusy = true;
+    _sideHustleUsedThisWait = false;
     _collectorGapTimer?.cancel();
     _collectorGapTimer = Timer(const Duration(seconds: collectorGapSeconds), () {
       collectorBusy = false;
@@ -638,6 +778,7 @@ class CareerController extends ChangeNotifier {
       recentStoryEvent = 'refused';
     }
     cartelSuspicion = _clamp01to100(cartelSuspicion + 2);
+    rivalPressure = _clamp01to100(rivalPressure + 3);
     _startCollectorGap();
     notifyListeners();
   }
@@ -655,6 +796,7 @@ class CareerController extends ChangeNotifier {
     if (_rng.nextDouble() < failChance) {
       targetState[targetId] = 'lost';
       policeHeat = _clamp01to100(policeHeat + (now ? 20 : 12));
+      rivalPressure = _clamp01to100(rivalPressure + (now ? 6 : 3));
       final line = _pickVariant(_rng, now ? kCrewFailNowLines : kCrewFailTonightLines, _lastCrewLine);
       threads['crew']!.add(Message(line, false));
       _lastCrewLine = line;
@@ -663,6 +805,7 @@ class CareerController extends ChangeNotifier {
       targetState[targetId] = 'paid';
       cartelSuspicion = _clamp01to100(cartelSuspicion + (now ? 3 : 2));
       policeHeat = _clamp01to100(policeHeat + (now ? 8 : 4));
+      rivalPressure = _clamp01to100(rivalPressure + (now ? 3 : 1));
       final line = _pickVariant(_rng, kCrewSuccessLines, _lastCrewLine);
       threads['crew']!.add(Message(line, false));
       _lastCrewLine = line;
@@ -723,6 +866,7 @@ class CareerController extends ChangeNotifier {
   // locks the next action for a stretch instead of chaining straight through.
   void _startLevel4Gap() {
     level4Busy = true;
+    _sideHustleUsedThisWait = false;
     _level4GapTimer?.cancel();
     _level4GapTimer = Timer(const Duration(seconds: level4GapSeconds), () {
       level4Busy = false;
@@ -751,12 +895,19 @@ class CareerController extends ChangeNotifier {
       final d = kDistributors.firstWhere((x) => x.id == entry.key);
       revenue += entry.value * d.pricePerKg;
     }
-    final take = (revenue * 0.10).round();
+    final take = (revenue * 0.10 * _pathIncomeMultiplier).round();
     cash += take;
     lastMonthTake = take;
     monthsAsLeader += 1;
     stashKg = 100;
     allocated.clear();
+    // A crew that only hears from a dealmaker or a numbers guy drifts a
+    // little every month — Muscle is the one path that's actually around.
+    if (careerPath == 'fixer' || careerPath == 'boss') {
+      for (final n in crewNames) {
+        crewLoyalty[n] = ((crewLoyalty[n] ?? 0.8) - 0.03).clamp(0, 1);
+      }
+    }
     // Heat cools slower now — a violent month lingers instead of washing out
     // by the next one. Suspicion creeps up a little every month regardless
     // of how careful you are; moving product at this volume is never fully invisible.
@@ -780,14 +931,16 @@ class CareerController extends ChangeNotifier {
     _tickPersonalRelationships();
 
     // Trouble and an incursion can both land the same month — reckless crew
-    // and hungry rivals don't wait for a convenient week.
-    if (_rng.nextDouble() < 0.45 && crewNames.isNotEmpty) {
+    // and hungry rivals don't wait for a convenient week. Muscle keeps a
+    // tighter leash on the crew, so trouble is rarer for that path.
+    if (_rng.nextDouble() < (careerPath == 'muscle' ? 0.30 : 0.45) && crewNames.isNotEmpty) {
       pendingTrouble = crewNames[_rng.nextInt(crewNames.length)];
       recentStoryEvent = 'crew_trouble';
     }
     if (_rng.nextDouble() < 0.45) {
-      pendingIncursion = 'A rival crew is testing your corner on the east side.';
+      pendingIncursion = '$rivalCrewName is testing your corner on the east side.';
       recentStoryEvent ??= 'incursion'; // don't overwrite crew_trouble if both land
+      rivalPressure = _clamp01to100(rivalPressure + 15);
     }
     if (pendingTrouble == null && pendingIncursion == null && monthsAsLeader >= kMonthsAsLeaderToPromote) {
       promotionAvailable = true;
@@ -808,9 +961,11 @@ class CareerController extends ChangeNotifier {
       recentStoryEvent = 'crew_violence';
       policeHeat = _clamp01to100(policeHeat + 25);
       cartelSuspicion = _clamp01to100(cartelSuspicion - 10);
+      rivalPressure = _clamp01to100(rivalPressure - 20);
     } else {
-      cash = (cash - 2000).clamp(0, 1 << 30);
+      cash = (cash - (2000 * _pathNegotiationCostMultiplier).round()).clamp(0, 1 << 30);
       cartelSuspicion = _clamp01to100(cartelSuspicion + 5);
+      rivalPressure = _clamp01to100(rivalPressure - 8);
     }
     pendingIncursion = null;
     if (pendingTrouble == null && monthsAsLeader >= kMonthsAsLeaderToPromote) promotionAvailable = true;
@@ -822,7 +977,8 @@ class CareerController extends ChangeNotifier {
     if (pendingTrouble != name) return;
     if (action == 'beating') {
       recentStoryEvent = 'crossed_line';
-      crewLoyalty[name] = ((crewLoyalty[name] ?? 0.8) - 0.15).clamp(0, 1);
+      // Muscle knows how to send a message without losing the room.
+      crewLoyalty[name] = ((crewLoyalty[name] ?? 0.8) - (careerPath == 'muscle' ? 0.075 : 0.15)).clamp(0, 1);
       policeHeat = _clamp01to100(policeHeat + 4);
     } else {
       crewNames.remove(name);
@@ -894,6 +1050,7 @@ class CareerController extends ChangeNotifier {
   // the pyramid you are, per [strategicGapSeconds].
   void _startStrategicGap() {
     strategicBusy = true;
+    _sideHustleUsedThisWait = false;
     _strategicGapTimer?.cancel();
     _strategicGapTimer = Timer(Duration(seconds: strategicGapSeconds), () {
       strategicBusy = false;
@@ -915,6 +1072,7 @@ class CareerController extends ChangeNotifier {
     cash -= 3000000;
     cartelSuspicion = _clamp01to100(cartelSuspicion + 15);
     policeHeat = _clamp01to100(policeHeat + 10);
+    rivalPressure = _clamp01to100(rivalPressure + 12);
     notifyListeners();
   }
 
@@ -934,7 +1092,7 @@ class CareerController extends ChangeNotifier {
     if (level == 5 && (pendingCellSkim != null || pendingCellPoach != null || pendingCellShortage != null)) return;
     if (level >= 6 && strategicEvent != null) return;
     final revenue = strategicMonthlyRevenue;
-    final take = (revenue * (level == 5 ? 0.08 : level == 6 ? 0.05 : 0.03)).round();
+    final take = (revenue * (level == 5 ? 0.08 : level == 6 ? 0.05 : 0.03) * _pathIncomeMultiplier).round();
     cash += take;
     strategicCycles += 1;
     policeHeat = _clamp01to100(policeHeat + 6);
@@ -1006,8 +1164,9 @@ class CareerController extends ChangeNotifier {
     if (controlled.isEmpty) return;
     final t = controlled[_rng.nextInt(controlled.length)];
     raidTargetName = t.name;
-    strategicEvent = 'A rival cartel is moving on your hold in ${t.name}.';
+    strategicEvent = '$rivalCrewName is moving on your hold in ${t.name}.';
     strategicEventKind = 'raid_territory';
+    rivalPressure = _clamp01to100(rivalPressure + 15);
   }
 
   void resolveStrategicEvent(String choice) {
@@ -1021,7 +1180,7 @@ class CareerController extends ChangeNotifier {
         break;
       case 'bribe':
         if (choice == 'pay') {
-          cash = (cash - 2000000).clamp(0, 1 << 30);
+          cash = (cash - (2000000 * _pathNegotiationCostMultiplier).round()).clamp(0, 1 << 30);
           policeHeat = _clamp01to100(policeHeat - 20);
         } else {
           policeHeat = _clamp01to100(policeHeat + 10);
@@ -1121,12 +1280,15 @@ class CareerController extends ChangeNotifier {
     if (choice == 'defend') {
       cartelSuspicion = _clamp01to100(cartelSuspicion - 10);
       policeHeat = _clamp01to100(policeHeat + 15);
+      rivalPressure = _clamp01to100(rivalPressure - 15);
     } else if (choice == 'payoff' && cash >= 1000000) {
       cash -= 1000000;
       cartelSuspicion = _clamp01to100(cartelSuspicion + 5);
+      rivalPressure = _clamp01to100(rivalPressure - 8);
     } else {
       t.controlled = false;
       cartelSuspicion = _clamp01to100(cartelSuspicion - 5);
+      rivalPressure = _clamp01to100(rivalPressure - 25);
     }
   }
 
@@ -1164,6 +1326,7 @@ class CareerController extends ChangeNotifier {
     }
     if (_rng.nextDouble() < 0.3 && cellLeaders.isNotEmpty) {
       pendingCellPoach = cellLeaders[_rng.nextInt(cellLeaders.length)].name;
+      rivalPressure = _clamp01to100(rivalPressure + 10);
     }
     if (_rng.nextDouble() < 0.3 && cellLeaders.isNotEmpty) {
       pendingCellShortage = cellLeaders[_rng.nextInt(cellLeaders.length)].name;
@@ -1203,11 +1366,13 @@ class CareerController extends ChangeNotifier {
     if (choice == 'reassure' && cash >= 100000) {
       cash -= 100000;
       cell.loyalty = (cell.loyalty + 0.2).clamp(0, 1);
+      rivalPressure = _clamp01to100(rivalPressure - 5);
     } else {
       // They walk — the cell falls apart without them for a while.
       cell.loyalty = (cell.loyalty - 0.3).clamp(0, 1);
       cell.performance = (cell.performance - 0.25).clamp(0, 1);
       cartelSuspicion = _clamp01to100(cartelSuspicion + 6);
+      rivalPressure = _clamp01to100(rivalPressure + 5);
     }
     pendingCellPoach = null;
     _afterCellEventResolved();

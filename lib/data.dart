@@ -39,6 +39,55 @@ const List<Contact> kContacts = [
 ];
 final Map<String, Contact> kContact = {for (final c in kContacts) c.id: c};
 
+/// One name is picked per run for [CareerController.rivalCrewName] — keeps
+/// every rival-pressure event (incursions, raids, warnings) talking about
+/// the same named crew instead of a different "a rival crew" each time.
+const List<String> kRivalCrewNames = [
+  'The Salazar Crew',
+  'The Reyes Outfit',
+  'Los Cuervos',
+  'The Vega Brothers',
+  'La Frontera Crew',
+];
+
+/// The Level 3->4 promotion fork — picked once per run, drives the small
+/// bonus/neglect modifiers in CareerController (see careerPath).
+class CareerPath {
+  final String id, label, description;
+  const CareerPath(this.id, this.label, this.description);
+}
+
+const List<CareerPath> kCareerPaths = [
+  CareerPath(
+    'muscle',
+    'Muscle',
+    'Lead with force. Crew stays in line and discipline costs less loyalty — but rivals aren\'t interested in negotiating with you.',
+  ),
+  CareerPath(
+    'fixer',
+    'Fixer',
+    'Lead with deals. Payoffs and bribes cost less and land better — but a crew that only hears from a dealmaker starts to drift.',
+  ),
+  CareerPath(
+    'boss',
+    'Boss',
+    'Lead with numbers. Every month and every cycle pays out a little more — but the crew notices you\'re not around.',
+  ),
+];
+
+/// Side-hustle payout per level — a fraction of that level's typical
+/// single-action reward, so the bonus stays proportional as the economy
+/// scales up (see [CareerController.runSideHustle]).
+const Map<int, int> kSideHustlePayout = {
+  1: 40,
+  2: 800,
+  3: 1200,
+  4: 8000,
+  5: 40000,
+  6: 200000,
+  7: 700000,
+};
+
 /// Mutable mood/memory state for a cartel-side contact (currently just
 /// El Primo). Lighter than [RelationshipState] — there's no closeness/trust/
 /// suspicion axis here; cartelSuspicion/policeHeat already cover that

@@ -24,6 +24,8 @@ class CellLeaderScreen extends StatelessWidget {
         ]),
         const SizedBox(height: 14),
         const LevelProgressBar(),
+        const SizedBox(height: 14),
+        MeterBar(label: 'Rival heat', value: g.rivalPressure, color: riskColor(c, g.rivalPressure)),
         const SizedBox(height: 18),
         Text('BALANCE', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink, spacing: 1.2)),
         const SizedBox(height: 6),
@@ -55,6 +57,10 @@ class CellLeaderScreen extends StatelessWidget {
             onTap: g.level4Busy ? null : g.closeMonth,
             child: Text(g.level4Busy ? 'Settling up…' : 'Close out the month'),
           ),
+          if (g.sideHustleAvailable) ...[
+            const SizedBox(height: 14),
+            const SideHustleCard(),
+          ],
         ],
       ],
     );
