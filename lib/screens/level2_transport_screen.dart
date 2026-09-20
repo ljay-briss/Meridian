@@ -39,7 +39,7 @@ class TransportScreen extends StatelessWidget {
         const SizedBox(height: 18),
         Text('BALANCE', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink, spacing: 1.2)),
         const SizedBox(height: 6),
-        Text(money(g.cash), style: AppText.mono(size: 44, weight: FontWeight.w600, color: c.ink)),
+        Text(money(g.cash), style: AppText.mono(size: 44, weight: FontWeight.w600, color: cashColor(c, g.cash))),
         const SizedBox(height: 6),
         Text('pay: \$3,000/run · ${g.successfulRuns} runs clean',
             style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink)),
@@ -56,10 +56,6 @@ class TransportScreen extends StatelessWidget {
           Text('The truck is loaded. Eight hours to the crossing.', style: AppText.sans(size: 15, weight: FontWeight.w500, color: c.ink, height: 1.6)),
           const SizedBox(height: 20),
           AppButton(kind: BtnKind.dark, full: true, height: 50, onTap: g.beginRun, child: const Text('Begin run')),
-          if (g.sideHustleAvailable) ...[
-            const SizedBox(height: 14),
-            const SideHustleCard(),
-          ],
         ] else ...[
           Builder(builder: (context) {
             final checkpoint = kCheckpoints[stage];
@@ -80,6 +76,12 @@ class TransportScreen extends StatelessWidget {
                 ),
             ]);
           }),
+        ],
+        // Always on offer, whether the truck is idle or mid-checkpoint —
+        // not just while waiting for the next run to begin.
+        if (g.sideHustleAvailable) ...[
+          const SizedBox(height: 14),
+          const SideHustleCard(),
         ],
       ],
     );

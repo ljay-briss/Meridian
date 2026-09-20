@@ -59,7 +59,6 @@ class CareerController extends ChangeNotifier {
   double rivalPressure = 0;
   late String rivalCrewName;
   String? pendingRivalWarning;
-  bool _sideHustleUsedThisWait = false;
 
   // Chosen once, at the Level 3->4 promotion fork (see acceptPromotion) —
   // deliberately not reset in restart(): dying past Level 4 restarts you at
@@ -86,6 +85,12 @@ class CareerController extends ChangeNotifier {
   final ContactMood handlerMood = ContactMood(); // how El Primo's been feeling about your calls lately
   final Set<int> tutorialSeenLevels = {}; // per app session — survives restart(), not devJumpToLevel spam
   int? pendingTutorialBannerLevel; // set alongside the message; UI consumes it to pop a top banner once
+  bool fieldGuideSeen = false; // per app session — the one-time vehicle silhouette field guide, shown before the first Level 1 shift
+
+  // The side hustle's minigame pick — set by [startSideHustle], consumed by
+  // whichever screen pushes the matching game, resolved by [resolveSideHustle].
+  SideHustleGameKind? pendingSideHustleGame;
+  SideHustleGameKind? _lastSideHustleGame; // avoid immediately repeating the same minigame
 
   // Advances once per _tickPersonalRelationships() beat — this is a
   // turn-based game with no wall clock, so "time of day" is driven by
@@ -102,7 +107,13 @@ class CareerController extends ChangeNotifier {
   double? get levelProgress {
     switch (level) {
       case 1:
-        return (cleanWeeks / kCleanWeeksToPromote).clamp(0, 1);
+        // cleanWeeks only moves once every 7 days — fold in how far the
+        // *current* week has gotten so the bar advances after every clean
+        // day instead of sitting still for most of a week. Voided the
+        // moment a strike lands this week, since that week won't count.
+        final daysIntoWeek = (day - 1) % 7;
+        final weekFraction = weeklyStrikeOccurred ? 0.0 : daysIntoWeek / 7;
+        return ((cleanWeeks + weekFraction) / kCleanWeeksToPromote).clamp(0, 1);
       case 2:
         return (successfulRuns / kSuccessfulRunsToPromote).clamp(0, 1);
       case 3:
@@ -157,9 +168,10 @@ class CareerController extends ChangeNotifier {
   }
 
   // ── Level 1: Plaza Lookout ──
-  static const int sightingsPerDay = 3;
+  static const int sightingsPerDay = 3; // no longer gates the day boundary — kept as a display counter only
   static const int responseWindowSeconds = 15;
   static const int sightingGapSeconds = 5; // quiet road between sightings
+  static const int dayDurationSeconds = 300; // a shift is 5 real minutes, start to end
   int strikes = 0;
   Sighting? sighting;
   bool sightingHandled = false;
@@ -169,8 +181,12 @@ class CareerController extends ChangeNotifier {
   int sightingsToday = 0;
   int secondsRemaining = responseWindowSeconds;
   int sightingSeq = 0; // bumped on every roll, even if the pool repeats an entry
+  bool dayStarted = false; // player must tap "Start shift" before sightings roll
+  bool _dayTimeUp = false; // the 5-minute shift clock ran out — day ends once the current sighting (if any) resolves
+  int daySecondsRemaining = dayDurationSeconds;
   Timer? _sightingTimer;
   Timer? _sightingGapTimer;
+  Timer? _dayTimer;
 
   // ── Level 2: Transporter ──
   int? runStage;
@@ -320,33 +336,42 @@ class CareerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// True while the current level is sitting in one of its built-in waiting
-  /// moments (a pacing gap, or the idle stretch before the next sighting/run)
-  /// and the side hustle hasn't already been run during this particular
-  /// wait — see the `_sideHustleUsedThisWait` reset points scattered across
-  /// each level's gap-start / waiting-state code.
-  bool get sideHustleAvailable {
-    if (gameOver) return false;
-    final waiting = switch (level) {
-      1 => sighting == null,
-      2 => runStage == null,
-      3 => collectorBusy,
-      4 => level4Busy,
-      _ => strategicBusy,
-    };
-    return waiting && !_sideHustleUsedThisWait;
+  /// Always on offer, any time the player isn't dead — never gated to a
+  /// level's pacing gaps or limited to once per cycle. The card should never
+  /// just vanish on the player.
+  bool get sideHustleAvailable => !gameOver;
+
+  /// Opens a side hustle once per waiting window — turns the pacing gaps
+  /// into a small skill-based minigame instead of dead air. Picks a kind
+  /// different from whichever ran last time so the same game doesn't show
+  /// up twice in a row. The UI reads [pendingSideHustleGame] to know which
+  /// screen to push; the actual win/lose call is made by the player's play
+  /// in that screen, then reported back via [resolveSideHustle].
+  void startSideHustle() {
+    if (!sideHustleAvailable) return;
+    const kinds = SideHustleGameKind.values;
+    var kind = kinds[_rng.nextInt(kinds.length)];
+    if (kinds.length > 1) {
+      while (kind == _lastSideHustleGame) {
+        kind = kinds[_rng.nextInt(kinds.length)];
+      }
+    }
+    pendingSideHustleGame = kind;
+    notifyListeners();
   }
 
-  /// A quick, low-stakes side racket the player can run once per waiting
-  /// window — turns the pacing gaps into a small decision instead of dead
-  /// air. Odds favor the player; a miss only costs police heat, since
-  /// rivalPressure is reserved for genuinely rival-flavored events.
-  void runSideHustle() {
-    if (!sideHustleAvailable) return;
-    _sideHustleUsedThisWait = true;
-    if (_rng.nextDouble() < 0.7) {
+  /// Reports the outcome of whichever minigame [startSideHustle] opened. A
+  /// win pays this level's side-hustle rate; a loss costs a smaller, scaled
+  /// amount and a small heat bump — unlike every other cash deduction in the
+  /// game, this loss is allowed to push [cash] negative.
+  void resolveSideHustle(bool won) {
+    if (pendingSideHustleGame == null) return;
+    _lastSideHustleGame = pendingSideHustleGame;
+    pendingSideHustleGame = null;
+    if (won) {
       cash += kSideHustlePayout[level] ?? 0;
     } else {
+      cash -= kSideHustleLossPayout[level] ?? 0;
       policeHeat = _clamp01to100(policeHeat + 6);
     }
     notifyListeners();
@@ -396,6 +421,12 @@ class CareerController extends ChangeNotifier {
 
   void consumeTutorialBanner() => pendingTutorialBannerLevel = null;
 
+  void markFieldGuideSeen() {
+    if (fieldGuideSeen) return;
+    fieldGuideSeen = true;
+    notifyListeners();
+  }
+
   /// A death restarts the player at the level they died on, not back at
   /// Level 1 — dying as a Plaza Boss shouldn't send you back to lookout duty.
   void restart() {
@@ -410,7 +441,7 @@ class CareerController extends ChangeNotifier {
     rivalPressure = 0;
     rivalCrewName = _pickRivalCrewName(_rng);
     pendingRivalWarning = null;
-    _sideHustleUsedThisWait = false;
+    pendingSideHustleGame = null;
     _relationshipTickCount = 0;
     threads.updateAll((key, value) => []);
     relationships.updateAll((key, value) => RelationshipState());
@@ -476,17 +507,33 @@ class CareerController extends ChangeNotifier {
     _collectorGapTimer?.cancel();
     _level4GapTimer?.cancel();
     _strategicGapTimer?.cancel();
+    _dayTimer?.cancel();
     level = 1;
     strikes = 0;
     cleanWeeks = 0;
     weeklyStrikeOccurred = false;
     lastWarning = null;
     sightingsToday = 0;
+    sighting = null;
+    sightingHandled = false;
+    dayStarted = false;
+    _dayTimeUp = false;
+    daySecondsRemaining = dayDurationSeconds;
+  }
+
+  /// Player-initiated: the plaza is quiet until they tap in for the day.
+  /// Rolls the first sighting and starts both the response-window timer and
+  /// the 5-minute shift clock.
+  void startShift() {
+    if (level != 1 || dayStarted) return;
+    dayStarted = true;
+    _dayTimeUp = false;
     sighting = _rollSighting();
     sightingSeq += 1;
     sightingHandled = false;
-    _announce('handler', 'Eyes on the road. Military trucks: text "bird". Rival SUVs: text "snake". You have ${responseWindowSeconds}s to answer.');
     _startSightingTimer();
+    _startDayTimer();
+    notifyListeners();
   }
 
   Sighting _rollSighting() => kSightingPool[_rng.nextInt(kSightingPool.length)];
@@ -503,6 +550,42 @@ class CareerController extends ChangeNotifier {
         notifyListeners();
       }
     });
+  }
+
+  // A shift is 5 real minutes, independent of how many sightings roll through
+  // it. Firing this doesn't cut off a sighting mid-response-window — it just
+  // flags the shift as due to end; _resolveSighting (and the gap-timer
+  // callback, if the clock runs out during the quiet stretch between
+  // sightings) actually close the day out once nothing's left pending.
+  void _startDayTimer() {
+    _dayTimer?.cancel();
+    daySecondsRemaining = dayDurationSeconds;
+    _dayTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      daySecondsRemaining -= 1;
+      if (daySecondsRemaining <= 0) {
+        timer.cancel();
+        _dayTimeUp = true;
+        if (sighting == null) {
+          _endShiftIfIdle(); // notifies on its own
+          return;
+        }
+      }
+      notifyListeners();
+    });
+  }
+
+  /// Closes out the day from the quiet gap between sightings (no sighting
+  /// pending) once the shift clock has run out. Mirrors the tail end of
+  /// _resolveSighting for the case where the clock expires while waiting,
+  /// rather than while a sighting is on screen.
+  void _endShiftIfIdle() {
+    if (!_dayTimeUp || sighting != null) return;
+    _sightingGapTimer?.cancel();
+    _dayTimer?.cancel();
+    _dayTimeUp = false;
+    dayStarted = false;
+    _advanceDay(); // may end the game via _die, which notifies on its own
+    notifyListeners();
   }
 
   void respond(String word) {
@@ -583,19 +666,31 @@ class CareerController extends ChangeNotifier {
       if (gameOver) return;
     }
     unread = true;
+    sightingsToday += 1; // display-only tally now — the shift clock, not a sighting count, ends the day
 
-    // A handful of sightings make up one day — a single answer no longer skips a whole day.
-    sightingsToday += 1;
-    if (sightingsToday >= sightingsPerDay) {
-      sightingsToday = 0;
-      if (!_advanceDay()) return;
-    }
     // The road sits quiet for a stretch before the next thing worth reporting rolls by.
     sighting = null;
-    _sideHustleUsedThisWait = false;
+
+    if (_dayTimeUp) {
+      // The shift clock already ran out while this last sighting was still
+      // pending — close the day out now instead of rolling the gap timer.
+      sightingsToday = 0;
+      _dayTimeUp = false;
+      dayStarted = false;
+      _dayTimer?.cancel();
+      _advanceDay(); // may end the game via _die, which notifies on its own
+      notifyListeners();
+      return;
+    }
+
     notifyListeners();
     _sightingGapTimer?.cancel();
     _sightingGapTimer = Timer(const Duration(seconds: sightingGapSeconds), () {
+      if (_dayTimeUp) {
+        sightingsToday = 0;
+        _endShiftIfIdle(); // notifies on its own
+        return;
+      }
       sighting = _rollSighting();
       sightingSeq += 1;
       sightingHandled = false;
@@ -644,13 +739,13 @@ class CareerController extends ChangeNotifier {
     _collectorGapTimer?.cancel();
     _level4GapTimer?.cancel();
     _strategicGapTimer?.cancel();
+    _dayTimer?.cancel();
     level = 2;
     runStage = null;
     runRisk = 0;
     successfulRuns = 0;
     transportStrikes = 0;
     lastWarning = null;
-    _sideHustleUsedThisWait = false;
     _announce('handler', 'New job. Get the product across. Eight hours, don\'t stop for anyone.');
   }
 
@@ -681,7 +776,6 @@ class CareerController extends ChangeNotifier {
   void _resolveRun() {
     final caught = _rng.nextDouble() < runRisk.clamp(0, 0.85);
     runStage = null;
-    _sideHustleUsedThisWait = false;
     if (caught) {
       transportStrikes += 1;
       policeHeat = _clamp01to100(policeHeat + 15);
@@ -722,6 +816,7 @@ class CareerController extends ChangeNotifier {
     _collectorGapTimer?.cancel();
     _level4GapTimer?.cancel();
     _strategicGapTimer?.cancel();
+    _dayTimer?.cancel();
     level = 3;
     collected.clear();
     targetState.clear();
@@ -741,7 +836,6 @@ class CareerController extends ChangeNotifier {
   // clears, so a week can't be cleared in a handful of instant taps.
   void _startCollectorGap() {
     collectorBusy = true;
-    _sideHustleUsedThisWait = false;
     _collectorGapTimer?.cancel();
     _collectorGapTimer = Timer(const Duration(seconds: collectorGapSeconds), () {
       collectorBusy = false;
@@ -845,6 +939,7 @@ class CareerController extends ChangeNotifier {
     _collectorGapTimer?.cancel();
     _level4GapTimer?.cancel();
     _strategicGapTimer?.cancel();
+    _dayTimer?.cancel();
     level = 4;
     stashKg = 100;
     allocated.clear();
@@ -866,7 +961,6 @@ class CareerController extends ChangeNotifier {
   // locks the next action for a stretch instead of chaining straight through.
   void _startLevel4Gap() {
     level4Busy = true;
-    _sideHustleUsedThisWait = false;
     _level4GapTimer?.cancel();
     _level4GapTimer = Timer(const Duration(seconds: level4GapSeconds), () {
       level4Busy = false;
@@ -1004,6 +1098,7 @@ class CareerController extends ChangeNotifier {
     _collectorGapTimer?.cancel();
     _level4GapTimer?.cancel();
     _strategicGapTimer?.cancel();
+    _dayTimer?.cancel();
     level = lvl;
     strategicCycles = 0;
     strategicEvent = null;
@@ -1050,7 +1145,6 @@ class CareerController extends ChangeNotifier {
   // the pyramid you are, per [strategicGapSeconds].
   void _startStrategicGap() {
     strategicBusy = true;
-    _sideHustleUsedThisWait = false;
     _strategicGapTimer?.cancel();
     _strategicGapTimer = Timer(Duration(seconds: strategicGapSeconds), () {
       strategicBusy = false;
@@ -2583,6 +2677,7 @@ class CareerController extends ChangeNotifier {
     _collectorGapTimer?.cancel();
     _level4GapTimer?.cancel();
     _strategicGapTimer?.cancel();
+    _dayTimer?.cancel();
     super.dispose();
   }
 }

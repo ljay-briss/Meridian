@@ -16,6 +16,7 @@ import 'screens/level4_territory_screen.dart';
 import 'screens/strategic_screen.dart';
 import 'screens/strategic_org_screen.dart';
 import 'screens/strategic_territory_screen.dart';
+import 'screens/vehicle_field_guide_screen.dart';
 
 void main() => runApp(const MeridianApp());
 
@@ -71,6 +72,14 @@ class _RootState extends State<_Root> {
     final g = AppScope.of(context);
 
     if (g.gameOver) return const GameOverScreen();
+
+    // Blocks entry to Level 1 exactly once per session — the sighting text
+    // deliberately never names what's actually coming, so this (plus the
+    // persistent KEY legend on the home screen) is where that reading skill
+    // gets taught before the response-window clock is running.
+    if (g.level == 1 && !g.fieldGuideSeen) {
+      return VehicleFieldGuideScreen(onDone: g.markFieldGuideSeen);
+    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _maybePromote(context, g);

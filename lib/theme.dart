@@ -156,6 +156,10 @@ String money(num n) {
 
 String signedMoney(num n) => (n >= 0 ? '+' : '') + money(n);
 
+/// A negative balance (only reachable via a lost side-hustle minigame) reads
+/// as [AppColors.neg] instead of the normal ink color.
+Color cashColor(AppColors c, num cash) => cash < 0 ? c.neg : c.ink;
+
 Color riskColor(AppColors c, double risk) {
   if (risk < 20) return c.inkFaint;
   if (risk < 45) return c.pos;

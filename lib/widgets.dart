@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'controller.dart';
 import 'data.dart';
+import 'screens/minigames/side_hustle_router.dart';
 import 'theme.dart';
 
 /// Surface card.
@@ -240,9 +241,16 @@ class SideHustleCard extends StatelessWidget {
           ]),
         ),
         const SizedBox(width: 12),
-        AppButton(kind: BtnKind.ghost, onTap: g.runSideHustle, child: const Text('Run it')),
+        AppButton(kind: BtnKind.ghost, onTap: () => _openSideHustle(context, g), child: const Text('Play')),
       ]),
     );
+  }
+
+  Future<void> _openSideHustle(BuildContext context, CareerController g) async {
+    g.startSideHustle();
+    final kind = g.pendingSideHustleGame;
+    if (kind == null) return;
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => sideHustleScreenFor(kind)));
   }
 }
 
@@ -655,8 +663,6 @@ class RoadAnimation extends StatefulWidget {
 }
 
 class _RoadAnimationState extends State<RoadAnimation> with SingleTickerProviderStateMixin {
-  static const _truckWidth = 42.0, _suvWidth = 30.0, _vanWidth = 26.0;
-
   late final AnimationController _c = AnimationController(
     vsync: this,
     duration: const Duration(seconds: CareerController.responseWindowSeconds),
@@ -731,27 +737,9 @@ class _RoadAnimationState extends State<RoadAnimation> with SingleTickerProvider
     );
   }
 
-  double _vehicleWidth(SightingKind kind) {
-    switch (kind) {
-      case SightingKind.military:
-        return _truckWidth;
-      case SightingKind.rival:
-        return _suvWidth;
-      case SightingKind.civilian:
-        return _vanWidth;
-    }
-  }
+  double _vehicleWidth(SightingKind kind) => vehicleWidthFor(kind);
 
-  Widget _vehicleShape(SightingKind kind, AppColors c) {
-    switch (kind) {
-      case SightingKind.military:
-        return _TruckShape(width: _truckWidth, height: 16, color: c.ink);
-      case SightingKind.rival:
-        return _SuvShape(width: _suvWidth, height: 12, color: c.inkSoft, glass: c.sunken);
-      case SightingKind.civilian:
-        return _VanShape(width: _vanWidth, height: 18, color: c.inkFaint, glass: c.surface);
-    }
-  }
+  Widget _vehicleShape(SightingKind kind, AppColors c) => vehicleShapeFor(kind, c);
 }
 
 class _CenterlinePainter extends CustomPainter {
@@ -777,6 +765,30 @@ class _CenterlinePainter extends CustomPainter {
 /// Shared wheel dot used by every road-vehicle silhouette below.
 Widget _wheel(double size, Color color) =>
     Container(width: size, height: size, decoration: BoxDecoration(shape: BoxShape.circle, color: color));
+
+const _kVehicleBaseWidth = {SightingKind.military: 42.0, SightingKind.rival: 30.0, SightingKind.civilian: 26.0};
+
+/// Un-scaled width of a vehicle's silhouette — kept in step with
+/// [vehicleShapeFor] so the road strip's travel arithmetic always matches
+/// what's actually drawn.
+double vehicleWidthFor(SightingKind kind) => _kVehicleBaseWidth[kind]!;
+
+/// The one source of truth for "what does this SightingKind look like" —
+/// used by the road strip during play, the one-time field guide, and the
+/// persistent KEY legend, so what a player is taught is exactly what they
+/// see. [scale] resizes the whole silhouette (the field guide/legend draw it
+/// bigger than the road strip does).
+Widget vehicleShapeFor(SightingKind kind, AppColors c, {double scale = 1}) {
+  final w = vehicleWidthFor(kind) * scale;
+  switch (kind) {
+    case SightingKind.military:
+      return _TruckShape(width: w, height: 16 * scale, color: c.ink);
+    case SightingKind.rival:
+      return _SuvShape(width: w, height: 12 * scale, color: c.inkSoft, glass: c.sunken);
+    case SightingKind.civilian:
+      return _VanShape(width: w, height: 18 * scale, color: c.inkFaint, glass: c.surface);
+  }
+}
 
 /// Military convoy — a cargo box trailing a shorter cab, front on the right.
 class _TruckShape extends StatelessWidget {

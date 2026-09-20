@@ -75,11 +75,11 @@ const List<CareerPath> kCareerPaths = [
   ),
 ];
 
-/// Side-hustle payout per level — a fraction of that level's typical
+/// Side-hustle win payout per level — a fraction of that level's typical
 /// single-action reward, so the bonus stays proportional as the economy
-/// scales up (see [CareerController.runSideHustle]).
+/// scales up (see [CareerController.resolveSideHustle]).
 const Map<int, int> kSideHustlePayout = {
-  1: 40,
+  1: 50,
   2: 800,
   3: 1200,
   4: 8000,
@@ -87,6 +87,24 @@ const Map<int, int> kSideHustlePayout = {
   6: 200000,
   7: 700000,
 };
+
+/// Side-hustle loss cost per level — 40% of that level's win payout, so a
+/// loss stings without being punitive. Unlike every other cash deduction in
+/// the game this is allowed to push [CareerController.cash] negative.
+const Map<int, int> kSideHustleLossPayout = {
+  1: 20,
+  2: 320,
+  3: 480,
+  4: 3200,
+  5: 16000,
+  6: 80000,
+  7: 280000,
+};
+
+/// Which minigame the "Play" side hustle card opens — picked fresh each time
+/// (never repeating the immediately previous one) by
+/// [CareerController.startSideHustle].
+enum SideHustleGameKind { cups, blackjack, readTheTell, timingStop, higherLower, sequence, spotFake, numbersRacket }
 
 /// Mutable mood/memory state for a cartel-side contact (currently just
 /// El Primo). Lighter than [RelationshipState] — there's no closeness/trust/
@@ -161,12 +179,23 @@ class Sighting {
   const Sighting(this.kind, this.description, this.correctWord);
 }
 
+// Descriptions deliberately never name what's actually coming — the vehicle
+// silhouette on the road strip (see RoadAnimation / vehicleShapeFor) is the
+// only thing that discloses SightingKind. The text sets a scene; reading the
+// shape is the actual skill.
 const List<Sighting> kSightingPool = [
-  Sighting(SightingKind.military, 'Two military trucks roll toward the checkpoint.', 'bird'),
-  Sighting(SightingKind.military, 'A convoy of federal trucks slows near the plaza.', 'bird'),
-  Sighting(SightingKind.rival, 'A black SUV with tinted windows idles at the corner.', 'snake'),
-  Sighting(SightingKind.rival, 'Two black SUVs circle the block twice.', 'snake'),
-  Sighting(SightingKind.civilian, 'Just a delivery van. Nothing unusual.', 'clear'),
+  Sighting(SightingKind.military, 'Something big rumbles in from the east, moving slow and heavy.', 'bird'),
+  Sighting(SightingKind.military, 'A low diesel growl gets louder before you see anything.', 'bird'),
+  Sighting(SightingKind.military, 'Whatever that is, it\'s taking up both lanes.', 'bird'),
+  Sighting(SightingKind.military, 'Ground\'s shaking a little. That\'s not a car.', 'bird'),
+  Sighting(SightingKind.rival, 'A low, tinted shape slides around the corner and idles.', 'snake'),
+  Sighting(SightingKind.rival, 'Something glides in quiet, windows dark, and just... waits.', 'snake'),
+  Sighting(SightingKind.rival, 'It rolls past slow, like it wants to be seen. Or noticed.', 'snake'),
+  Sighting(SightingKind.rival, 'Sits low to the ground, engine barely running. Watching, maybe.', 'snake'),
+  Sighting(SightingKind.civilian, 'Just routine traffic passing through.', 'clear'),
+  Sighting(SightingKind.civilian, 'Nothing out of the ordinary — comes and goes.', 'clear'),
+  Sighting(SightingKind.civilian, 'Someone running an errand, by the look of it.', 'clear'),
+  Sighting(SightingKind.civilian, 'Comes up the block, doesn\'t slow, keeps moving.', 'clear'),
 ];
 
 // ── Level 2: Transporter ────────────────────────────────────────────────

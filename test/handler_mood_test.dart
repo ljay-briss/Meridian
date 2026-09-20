@@ -8,6 +8,7 @@ void main() {
     test('a wrong sighting response now gets a handler reaction line', () {
       final g = CareerController();
       addTearDown(g.dispose);
+      g.startShift();
       final wrong = g.sighting!.correctWord == 'bird' ? 'snake' : 'bird';
       final before = g.threads['handler']!.length;
       g.respond(wrong);
@@ -22,11 +23,13 @@ void main() {
     test('mood rises on a correct report and falls on a wrong one', () {
       final correctGame = CareerController();
       addTearDown(correctGame.dispose);
+      correctGame.startShift();
       correctGame.respond(correctGame.sighting!.correctWord);
       expect(correctGame.handlerMood.mood, greaterThan(0));
 
       final wrongGame = CareerController();
       addTearDown(wrongGame.dispose);
+      wrongGame.startShift();
       final wrong = wrongGame.sighting!.correctWord == 'bird' ? 'snake' : 'bird';
       wrongGame.respond(wrong);
       expect(wrongGame.handlerMood.mood, lessThan(0));
@@ -41,6 +44,7 @@ void main() {
       addTearDown(g.dispose);
       final seen = <String>{};
       fakeAsync((async) {
+        g.startShift();
         for (var i = 0; i < 30; i++) {
           final before = g.threads['handler']!.length;
           g.respond(g.sighting!.correctWord);
@@ -58,6 +62,7 @@ void main() {
     test('restart resets handler mood', () {
       final g = CareerController();
       addTearDown(g.dispose);
+      g.startShift();
       g.respond(g.sighting!.correctWord);
       expect(g.handlerMood.mood, isNot(0));
       g.restart();

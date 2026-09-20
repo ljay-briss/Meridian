@@ -28,7 +28,7 @@ class CollectorScreen extends StatelessWidget {
         const SizedBox(height: 18),
         Text('BALANCE', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink, spacing: 1.2)),
         const SizedBox(height: 6),
-        Text(money(g.cash), style: AppText.mono(size: 44, weight: FontWeight.w600, color: c.ink)),
+        Text(money(g.cash), style: AppText.mono(size: 44, weight: FontWeight.w600, color: cashColor(c, g.cash))),
         const SizedBox(height: 6),
         Text('collected ${money(g.collectedTotal)} / ${money(g.expectedTotal)} owed this week',
             style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink)),

@@ -29,7 +29,7 @@ class CellLeaderScreen extends StatelessWidget {
         const SizedBox(height: 18),
         Text('BALANCE', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink, spacing: 1.2)),
         const SizedBox(height: 6),
-        Text(money(g.cash), style: AppText.mono(size: 44, weight: FontWeight.w600, color: c.ink)),
+        Text(money(g.cash), style: AppText.mono(size: 44, weight: FontWeight.w600, color: cashColor(c, g.cash))),
         const SizedBox(height: 6),
         Text('month ${g.monthsAsLeader + 1} · last take ${money(g.lastMonthTake)}', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink)),
         Container(height: 1, color: c.lineSoft, margin: const EdgeInsets.symmetric(vertical: 22)),
@@ -57,10 +57,12 @@ class CellLeaderScreen extends StatelessWidget {
             onTap: g.level4Busy ? null : g.closeMonth,
             child: Text(g.level4Busy ? 'Settling up…' : 'Close out the month'),
           ),
-          if (g.sideHustleAvailable) ...[
-            const SizedBox(height: 14),
-            const SideHustleCard(),
-          ],
+        ],
+        // Always on offer, even with a crew/territory crisis blocking the
+        // month-close button — not just while otherwise idle.
+        if (g.sideHustleAvailable) ...[
+          const SizedBox(height: 14),
+          const SideHustleCard(),
         ],
       ],
     );

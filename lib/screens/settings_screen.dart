@@ -40,7 +40,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             if (g.careerPath != null)
               KVRow('Career path', Text(kCareerPaths.firstWhere((p) => p.id == g.careerPath).label, style: AppText.mono(size: 14, color: c.ink))),
             KVRow('Day', Text(g.dayLabel, style: AppText.mono(size: 14, color: c.ink))),
-            KVRow('Cash on hand', Text(money(g.cash), style: AppText.mono(size: 14, color: c.ink))),
+            KVRow('Cash on hand', Text(money(g.cash), style: AppText.mono(size: 14, color: cashColor(c, g.cash)))),
             KVRow('Laundered', Text(money(g.cleanBalance), style: AppText.mono(size: 14, color: c.ink))),
             KVRow('Police heat', Text(riskLabel(g.policeHeat), style: AppText.mono(size: 14, color: riskColor(c, g.policeHeat)))),
             KVRow('Cartel suspicion', Text(riskLabel(g.cartelSuspicion), style: AppText.mono(size: 14, color: riskColor(c, g.cartelSuspicion)))),

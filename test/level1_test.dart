@@ -4,10 +4,22 @@ import 'package:meridian_private/controller.dart';
 
 void main() {
   group('Level 1 — Plaza Lookout', () {
+    test('the shift doesn\'t start on its own — no sighting until startShift() is called', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      expect(g.dayStarted, isFalse);
+      expect(g.sighting, isNull);
+
+      g.startShift();
+      expect(g.dayStarted, isTrue);
+      expect(g.sighting, isNotNull);
+    });
+
     test('the road goes quiet right after answering, then the next sighting rolls after the gap', () {
       fakeAsync((async) {
         final g = CareerController();
         addTearDown(g.dispose);
+        g.startShift();
         final firstSighting = g.sighting;
         expect(firstSighting, isNotNull);
 
@@ -21,27 +33,49 @@ void main() {
       });
     });
 
-    test('the day only advances every few sightings, not on every single answer', () {
+    test('answering many sightings doesn\'t end the day early — only the shift clock does', () {
       fakeAsync((async) {
         final g = CareerController();
         addTearDown(g.dispose);
+        g.startShift();
         final dayBefore = g.day;
 
-        // Answer one fewer sighting than it takes to complete a day.
-        for (var i = 0; i < CareerController.sightingsPerDay - 1; i++) {
-          g.respond(g.sighting!.correctWord);
-          async.elapse(const Duration(seconds: CareerController.sightingGapSeconds));
+        // Far more sightings than the old 3-per-day count would ever have
+        // allowed, well under the 5-minute shift clock.
+        for (var elapsed = 0; elapsed < 60; elapsed++) {
+          if (g.sighting != null) g.respond(g.sighting!.correctWord);
+          async.elapse(const Duration(seconds: 1));
         }
-        expect(g.day, dayBefore); // still the same day
 
-        g.respond(g.sighting!.correctWord); // the sighting that completes the day
+        expect(g.day, dayBefore); // still the same day
+        expect(g.dayStarted, isTrue); // shift still running
+      });
+    });
+
+    test('the day advances once the 5-minute shift clock runs out, independent of sighting count', () {
+      fakeAsync((async) {
+        final g = CareerController();
+        addTearDown(g.dispose);
+        g.startShift();
+        final dayBefore = g.day;
+
+        var elapsed = 0;
+        while (elapsed < CareerController.dayDurationSeconds && g.dayStarted) {
+          if (g.sighting != null) g.respond(g.sighting!.correctWord);
+          async.elapse(const Duration(seconds: 1));
+          elapsed += 1;
+        }
+
         expect(g.day, dayBefore + 1);
+        expect(g.dayStarted, isFalse); // back to the "start shift" idle state
+        expect(g.gameOver, isFalse); // every sighting was answered correctly throughout
       });
     });
 
     test('a wrong answer is penalized immediately (heat/suspicion), not just a strike', () {
       final g = CareerController();
       addTearDown(g.dispose);
+      g.startShift();
       final wrong = g.sighting!.correctWord == 'bird' ? 'snake' : 'bird';
       final heatBefore = g.policeHeat;
       final suspicionBefore = g.cartelSuspicion;
@@ -58,6 +92,7 @@ void main() {
       fakeAsync((async) {
         final g = CareerController();
         addTearDown(g.dispose);
+        g.startShift();
         for (var i = 0; i < 2 && !g.gameOver; i++) {
           final wrong = g.sighting!.correctWord == 'bird' ? 'snake' : 'bird';
           g.respond(wrong);
@@ -72,6 +107,7 @@ void main() {
       fakeAsync((async) {
         final g = CareerController();
         addTearDown(g.dispose);
+        g.startShift();
         expect(g.secondsRemaining, CareerController.responseWindowSeconds);
 
         async.elapse(const Duration(seconds: 4));
@@ -83,6 +119,7 @@ void main() {
       fakeAsync((async) {
         final g = CareerController();
         addTearDown(g.dispose);
+        g.startShift();
         final heatBefore = g.policeHeat;
         final suspicionBefore = g.cartelSuspicion;
 
@@ -99,10 +136,45 @@ void main() {
       });
     });
 
+    test('the promotion bar advances after every clean day, not just once a week', () {
+      fakeAsync((async) {
+        final g = CareerController();
+        addTearDown(g.dispose);
+        g.startShift();
+        expect(g.levelProgress, 0);
+
+        final dayBefore = g.day;
+        var elapsed = 0;
+        while (g.day == dayBefore && elapsed <= CareerController.dayDurationSeconds) {
+          if (g.sighting != null) g.respond(g.sighting!.correctWord);
+          async.elapse(const Duration(seconds: 1));
+          elapsed += 1;
+        }
+
+        expect(g.day, dayBefore + 1); // one clean day closed out
+        expect(g.gameOver, isFalse);
+        expect(g.levelProgress, greaterThan(0)); // the bar has moved…
+        expect(g.levelProgress, lessThan(1 / CareerController.kCleanWeeksToPromote)); // …but a single day isn't a whole week
+      });
+    });
+
+    test('a strike this week zeroes the in-progress fraction of the bar', () {
+      final g = CareerController();
+      addTearDown(g.dispose);
+      g.startShift();
+      final wrong = g.sighting!.correctWord == 'bird' ? 'snake' : 'bird';
+
+      g.respond(wrong); // strike 1 — not dead yet, but this week is voided
+
+      expect(g.gameOver, isFalse);
+      expect(g.levelProgress, 0);
+    });
+
     test('answering in time cancels the pending timeout — no duplicate penalty', () {
       fakeAsync((async) {
         final g = CareerController();
         addTearDown(g.dispose);
+        g.startShift();
 
         async.elapse(const Duration(seconds: 3)); // partway through the first window
         g.respond(g.sighting!.correctWord); // answered — should cancel the original timer
