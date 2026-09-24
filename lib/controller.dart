@@ -192,7 +192,15 @@ class CareerController extends ChangeNotifier {
   int? runStage;
   double runRisk = 0;
   int successfulRuns = 0;
-  int transportStrikes = 0;
+  RunOutcome? lastRunOutcome;
+  // Which CheckpointVariant is in play at each checkpoint this run — rolled
+  // fresh in [beginRun] so the tell (and which choice it favors) changes run
+  // to run instead of the scene always reading the same way.
+  List<int> _runVariantIdx = [];
+
+  /// The scene variant on offer at [stage] this run — read [CheckpointVariant]
+  /// for what "favors" means. Only valid while a run is active.
+  CheckpointVariant checkpointVariantAt(int stage) => kCheckpoints[stage].variants[_runVariantIdx[stage]];
 
   // ── Level 3: Collector ──
   static const int collectorGapSeconds = 4; // travel time between stops
@@ -201,7 +209,26 @@ class CareerController extends ChangeNotifier {
   final Map<String, String> targetExcuse = {};
   int collectorWeeks = 0;
   bool collectorBusy = false; // traveling between stops — no action can be taken
+  // Set the instant the UI starts an action's suspense beat, before the
+  // real roll happens — kept separate from [collectorBusy] (the travel-time
+  // gap that only starts once a roll resolves) so the two locks don't
+  // stomp on each other.
+  bool actionInFlight = false;
   Timer? _collectorGapTimer;
+  // Set by [reportToBoss] when the week closes short — held just long enough
+  // for the UI to pop up and tell the player the gap came out of their own
+  // pocket, instead of that happening silently.
+  String? shortfallNotice;
+  // Consecutive clean weeks each target has been paid in full — a pattern
+  // the rival crew can notice (see [_maybeTriggerFactionNotice]), so paying
+  // a target reliably isn't a free action forever.
+  final Map<String, int> targetPaidStreak = {};
+  // Targets the rival crew has muscled in on — permanently skims a cut of
+  // what they pay from then on (see [effectiveOwed]), a small persistent
+  // scar on the world from how the player played earlier weeks.
+  final Set<String> targetUnderRivalWatch = {};
+  static const int kFactionNoticeStreak = 2;
+  static const double kFactionCutFraction = 0.3; // the rival's skim once they've noticed
 
   // ── Level 4: Cell Leader ──
   static const int level4GapSeconds = 5; // settling time after closing a month or a crisis
@@ -744,8 +771,9 @@ class CareerController extends ChangeNotifier {
     runStage = null;
     runRisk = 0;
     successfulRuns = 0;
-    transportStrikes = 0;
     lastWarning = null;
+    lastRunOutcome = null;
+    _runVariantIdx = [];
     _announce('handler', 'New job. Get the product across. Eight hours, don\'t stop for anyone.');
   }
 
@@ -754,17 +782,34 @@ class CareerController extends ChangeNotifier {
     runStage = 0;
     runRisk = 0.05;
     lastWarning = null;
+    lastRunOutcome = null;
+    _runVariantIdx = [for (final cp in kCheckpoints) _rng.nextInt(cp.variants.length)];
     notifyListeners();
   }
 
-  void chooseCheckpoint(CheckpointChoice choice) {
+  /// [tapSucceeded] is the result of the quick timing-tap a bribe choice
+  /// (`choice.cost > 0`) sends the player through before this is called —
+  /// null for a choice that doesn't bribe anyone. A sold bribe keeps its
+  /// low listed risk; a fumbled one draws more attention than just driving
+  /// through would have, on top of the money already being gone either way.
+  void chooseCheckpoint(CheckpointChoice choice, {bool? tapSucceeded}) {
     if (level != 2 || runStage == null) return;
+    final checkpoint = kCheckpoints[runStage!];
     if (choice.cost > 0) {
       if (cash < choice.cost) return;
       cash -= choice.cost;
       recentStoryEvent = 'bribed';
     }
-    runRisk += choice.riskDelta;
+    // Reading the checkpoint's tell right and picking the choice it favors
+    // earns a discount on top of whatever the choice already offers — the
+    // only reward for paying attention, no cash required.
+    final favoredIndex = checkpointVariantAt(runStage!).favoredChoiceIndex;
+    final matchedTell = checkpoint.choices.indexOf(choice) == favoredIndex;
+    var delta = matchedTell ? choice.riskDelta * 0.4 : choice.riskDelta;
+    if (choice.cost > 0) {
+      delta = tapSucceeded == true ? delta * 0.75 : delta + 0.20;
+    }
+    runRisk += delta;
     runStage = runStage! + 1;
     if (runStage! >= kCheckpoints.length) {
       _resolveRun();
@@ -777,19 +822,16 @@ class CareerController extends ChangeNotifier {
     final caught = _rng.nextDouble() < runRisk.clamp(0, 0.85);
     runStage = null;
     if (caught) {
-      transportStrikes += 1;
+      // A fine, not a strike — being caught costs cash instead of counting
+      // toward an arrest, so a bad run stings without ending the career.
+      cash -= 650;
       policeHeat = _clamp01to100(policeHeat + 15);
       recentStoryEvent = 'close_call';
       if (_rng.nextDouble() < 0.4) {
         rivalPressure = _clamp01to100(rivalPressure + 10);
       }
-      if (transportStrikes >= 2) {
-        _die('Stopped at the crossing. Twenty years, no parole hearing for a while.', arrested: true);
-        return;
-      }
-      // A first close call costs the load and the pay, but not the run — same
-      // two-strike shape as the lookout job: one warning, then it's fatal.
-      lastWarning = 'Almost got stopped at the crossing. No cargo, no pay this run. One strike — a second ends it.';
+      lastWarning = 'Almost got stopped at the crossing — paid \$650 to make it disappear. No cargo, no pay this run.';
+      lastRunOutcome = const RunOutcome(caught: true, cashDelta: -650);
       if (_checkExposure()) return;
       _tickPersonalRelationships();
       notifyListeners();
@@ -797,12 +839,21 @@ class CareerController extends ChangeNotifier {
     }
     lastWarning = null;
     recentStoryEvent = 'run_success';
-    cash += 3000;
+    cash += 1000;
     successfulRuns += 1;
     policeHeat = _clamp01to100(policeHeat + 8);
+    lastRunOutcome = const RunOutcome(caught: false, cashDelta: 1000);
     if (_checkExposure()) return;
     _tickPersonalRelationships();
     if (successfulRuns >= kSuccessfulRunsToPromote) promotionAvailable = true;
+    notifyListeners();
+  }
+
+  /// Dismisses the post-run result panel [_resolveRun] left up, returning
+  /// the player to the idle "truck is loaded" screen.
+  void acknowledgeRunOutcome() {
+    if (lastRunOutcome == null) return;
+    lastRunOutcome = null;
     notifyListeners();
   }
 
@@ -826,10 +877,18 @@ class CareerController extends ChangeNotifier {
     }
     collectorWeeks = 0;
     collectorBusy = false;
+    actionInFlight = false;
+    shortfallNotice = null;
+    targetPaidStreak.clear();
+    targetUnderRivalWatch.clear();
     _announce('handler', 'Route\'s the same every week. Come back short and it\'s on you.');
   }
 
-  int get expectedTotal => kCollectionRoute.fold(0, (a, t) => a + t.owed);
+  /// What a target actually pays out — full price, unless the rival crew
+  /// has noticed it paying like clockwork and started skimming a cut.
+  int effectiveOwed(CollectionTarget t) => targetUnderRivalWatch.contains(t.id) ? (t.owed * (1 - kFactionCutFraction)).round() : t.owed;
+
+  int get expectedTotal => kCollectionRoute.fold(0, (a, t) => a + effectiveOwed(t));
   int get collectedTotal => collected.values.fold(0, (a, v) => a + v);
 
   // Travel time to/from a stop — locks every action on the route until it
@@ -843,12 +902,29 @@ class CareerController extends ChangeNotifier {
     });
   }
 
+  /// Locks every collector action the instant the UI starts a target's
+  /// suspense beat — before [visit]/[threaten]/[vandalize] have even rolled
+  /// — so a second tap can't land mid-animation. Cleared by
+  /// [endCollectorAction] right before the real call, which then re-locks
+  /// via [_startCollectorGap] once it resolves.
+  void beginCollectorAction() {
+    if (level != 3 || collectorBusy || actionInFlight) return;
+    actionInFlight = true;
+    notifyListeners();
+  }
+
+  void endCollectorAction() {
+    if (!actionInFlight) return;
+    actionInFlight = false;
+    notifyListeners();
+  }
+
   void visit(String targetId) {
     if (level != 3 || collectorBusy) return;
     if (targetState[targetId] != 'pending') return;
     final target = kCollectionRoute.firstWhere((t) => t.id == targetId);
     if (_rng.nextDouble() < 0.55) {
-      collected[targetId] = target.owed;
+      collected[targetId] = effectiveOwed(target);
       targetState[targetId] = 'paid';
     } else {
       targetState[targetId] = 'resisting';
@@ -865,7 +941,7 @@ class CareerController extends ChangeNotifier {
     if (targetState[targetId] != 'resisting') return;
     final target = kCollectionRoute.firstWhere((t) => t.id == targetId);
     if (_rng.nextDouble() < 0.45) {
-      collected[targetId] = target.owed;
+      collected[targetId] = effectiveOwed(target);
       targetState[targetId] = 'paid';
     } else {
       targetState[targetId] = 'refused';
@@ -895,7 +971,7 @@ class CareerController extends ChangeNotifier {
       threads['crew']!.add(Message(line, false));
       _lastCrewLine = line;
     } else {
-      collected[targetId] = target.owed * 2;
+      collected[targetId] = effectiveOwed(target) * 2;
       targetState[targetId] = 'paid';
       cartelSuspicion = _clamp01to100(cartelSuspicion + (now ? 3 : 2));
       policeHeat = _clamp01to100(policeHeat + (now ? 8 : 4));
@@ -909,15 +985,49 @@ class CareerController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// A target paying [kFactionNoticeStreak] weeks running is the kind of
+  /// steady income the rival crew eventually clocks — one notice at a time
+  /// keeps it readable, and the target it lands on permanently pays less
+  /// from then on (see [effectiveOwed]) while [rivalPressure] takes a real
+  /// hit, on the same track the existing rival-warning system already
+  /// watches.
+  void _maybeTriggerFactionNotice() {
+    if (targetUnderRivalWatch.isNotEmpty) return;
+    for (final t in kCollectionRoute) {
+      if ((targetPaidStreak[t.id] ?? 0) >= kFactionNoticeStreak && _rng.nextDouble() < 0.5) {
+        targetUnderRivalWatch.add(t.id);
+        rivalPressure = _clamp01to100(rivalPressure + 15);
+        _announce('handler', '$rivalCrewName noticed ${t.name} paying like clockwork. They\'re going to want a piece of that from now on.');
+        return;
+      }
+    }
+  }
+
   void reportToBoss() {
     if (level != 3 || collectorBusy) return;
     if (targetState.values.any((s) => s == 'pending' || s == 'resisting')) return;
-    if (collectedTotal < expectedTotal) {
-      _die('You came up \$${expectedTotal - collectedTotal} short. They don\'t forgive that.');
-      return;
+    final shortfall = expectedTotal - collectedTotal;
+    if (shortfall > 0) {
+      // Short weeks don't pay, and the gap comes out of the player's own
+      // pocket instead of ending the career outright — allowed to push cash
+      // negative, same as every other "caught" cost in the game.
+      cash -= shortfall;
+      cartelSuspicion = _clamp01to100(cartelSuspicion + 10);
+      shortfallNotice = 'Came up \$$shortfall short this week. The boss doesn\'t care why — it came out of your own pocket.';
+    } else {
+      cash += 1500;
+      collectorWeeks += 1;
     }
-    cash += 1500;
-    collectorWeeks += 1;
+    // A target paid reliably enough, enough weeks running, and the rival
+    // crew notices the pattern — persistent, not just this week's roll.
+    for (final t in kCollectionRoute) {
+      if (targetState[t.id] == 'paid') {
+        targetPaidStreak[t.id] = (targetPaidStreak[t.id] ?? 0) + 1;
+      } else {
+        targetPaidStreak[t.id] = 0;
+      }
+    }
+    _maybeTriggerFactionNotice();
     collected.clear();
     for (final t in kCollectionRoute) {
       targetState[t.id] = 'pending';
@@ -926,6 +1036,13 @@ class CareerController extends ChangeNotifier {
     if (_checkExposure()) return;
     _tickPersonalRelationships();
     if (collectorWeeks >= kCollectorWeeksToPromote) promotionAvailable = true;
+    notifyListeners();
+  }
+
+  /// Dismisses the shortfall popup [reportToBoss] raised.
+  void acknowledgeShortfall() {
+    if (shortfallNotice == null) return;
+    shortfallNotice = null;
     notifyListeners();
   }
 

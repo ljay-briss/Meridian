@@ -27,44 +27,40 @@ void _driveRun(CareerController g) {
 
 void main() {
   group('Level 2 — Transporter', () {
-    test('getting caught the first time is a strike, not instant arrest', () {
+    test('getting caught costs a cash fine instead of a strike', () {
       final g = CareerController(random: const _FixedRandom(0)); // 0.0 always "caught"
       addTearDown(g.dispose);
       g.devJumpToLevel(2);
 
       _driveRun(g);
 
-      expect(g.transportStrikes, 1);
+      expect(g.cash, -650);
       expect(g.gameOver, isFalse);
       expect(g.lastWarning, isNotNull);
       expect(g.runStage, isNull); // free to begin another run
-      expect(g.cash, 0); // no pay for a caught run
     });
 
-    test('a second catch ends the run in arrest', () {
+    test('repeated catches keep costing money without ending the career', () {
       final g = CareerController(random: const _FixedRandom(0));
       addTearDown(g.dispose);
       g.devJumpToLevel(2);
 
-      _driveRun(g); // strike 1
-      expect(g.gameOver, isFalse);
-      _driveRun(g); // strike 2
+      _driveRun(g);
+      _driveRun(g);
 
-      expect(g.gameOver, isTrue);
-      expect(g.arrested, isTrue);
-      expect(g.transportStrikes, 2);
+      expect(g.gameOver, isFalse);
+      expect(g.cash, -1300);
     });
 
-    test('a clean run does not touch the strike count', () {
+    test('a clean run pays out and does not touch cash negatively', () {
       final g = CareerController(random: const _FixedRandom(0.99)); // above the 0.85 clamp — never caught
       addTearDown(g.dispose);
       g.devJumpToLevel(2);
 
       _driveRun(g);
 
-      expect(g.transportStrikes, 0);
       expect(g.gameOver, isFalse);
-      expect(g.cash, 3000);
+      expect(g.cash, 1000);
       expect(g.successfulRuns, 1);
     });
 
@@ -73,11 +69,43 @@ void main() {
       addTearDown(g.dispose);
       g.devJumpToLevel(2);
 
-      _driveRun(g); // strike 1, sets lastWarning
+      _driveRun(g); // caught, sets lastWarning
       expect(g.lastWarning, isNotNull);
 
       g.beginRun();
       expect(g.lastWarning, isNull);
+    });
+
+    test('a bribe choice with no tap result defaults to the fumbled penalty', () {
+      final g = CareerController(random: const _FixedRandom(0.5));
+      addTearDown(g.dispose);
+      g.devJumpToLevel(2);
+      g.beginRun();
+      g.cash = 1000;
+
+      final bribeChoice = kCheckpoints[0].choices[1]; // 'Slip the guard' — 0.04 risk, $300
+      g.chooseCheckpoint(bribeChoice);
+
+      expect(g.runRisk, closeTo(0.05 + 0.04 + 0.20, 1e-9));
+      expect(g.cash, 700);
+    });
+
+    test('a successful bribe tap keeps the low risk; a failed one raises it', () {
+      final won = CareerController(random: const _FixedRandom(0.5));
+      addTearDown(won.dispose);
+      won.devJumpToLevel(2);
+      won.beginRun();
+      won.cash = 1000;
+      won.chooseCheckpoint(kCheckpoints[0].choices[1], tapSucceeded: true);
+      expect(won.runRisk, closeTo(0.05 + 0.04 * 0.75, 1e-9));
+
+      final lost = CareerController(random: const _FixedRandom(0.5));
+      addTearDown(lost.dispose);
+      lost.devJumpToLevel(2);
+      lost.beginRun();
+      lost.cash = 1000;
+      lost.chooseCheckpoint(kCheckpoints[0].choices[1], tapSucceeded: false);
+      expect(lost.runRisk, closeTo(0.05 + 0.04 + 0.20, 1e-9));
     });
   });
 }

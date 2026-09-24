@@ -80,7 +80,7 @@ const List<CareerPath> kCareerPaths = [
 /// scales up (see [CareerController.resolveSideHustle]).
 const Map<int, int> kSideHustlePayout = {
   1: 50,
-  2: 800,
+  2: 50,
   3: 1200,
   4: 8000,
   5: 40000,
@@ -93,7 +93,7 @@ const Map<int, int> kSideHustlePayout = {
 /// the game this is allowed to push [CareerController.cash] negative.
 const Map<int, int> kSideHustleLossPayout = {
   1: 20,
-  2: 320,
+  2: 20,
   3: 480,
   4: 3200,
   5: 16000,
@@ -200,10 +200,21 @@ const List<Sighting> kSightingPool = [
 
 // ── Level 2: Transporter ────────────────────────────────────────────────
 
-class Checkpoint {
+/// One way a checkpoint can play out. The flavor text carries a readable
+/// tell — a concrete detail, not a hint spelled out — that quietly favors
+/// [favoredChoiceIndex] this run. Picking that choice earns a risk discount
+/// on top of whatever the choice already offers; ignore the tell and the
+/// checkpoint still plays exactly as it used to.
+class CheckpointVariant {
   final String scene;
+  final int favoredChoiceIndex;
+  const CheckpointVariant(this.scene, this.favoredChoiceIndex);
+}
+
+class Checkpoint {
+  final List<CheckpointVariant> variants;
   final List<CheckpointChoice> choices;
-  const Checkpoint(this.scene, this.choices);
+  const Checkpoint(this.variants, this.choices);
 }
 
 class CheckpointChoice {
@@ -213,18 +224,38 @@ class CheckpointChoice {
   const CheckpointChoice(this.label, this.riskDelta, {this.cost = 0});
 }
 
+/// How a run just ended — held just long enough for the UI to show a
+/// resolution beat before the player taps back to idle.
+class RunOutcome {
+  final bool caught;
+  final int cashDelta; // signed: the run's payout, or the negative cost of getting caught
+  const RunOutcome({required this.caught, required this.cashDelta});
+}
+
 const List<Checkpoint> kCheckpoints = [
-  Checkpoint('A Border Patrol checkpoint sits ahead, lights on.', [
+  Checkpoint([
+    CheckpointVariant('A Border Patrol checkpoint sits ahead. The guard on duty is waving trucks through without a second glance.', 0),
+    CheckpointVariant('A Border Patrol checkpoint sits ahead. Just one guard on duty tonight, counting the minutes till his shift ends.', 1),
+    CheckpointVariant('A Border Patrol checkpoint sits ahead — two extra cruisers parked behind the booth that weren\'t there last week.', 2),
+  ], [
     CheckpointChoice('Drive through calm', 0.14),
     CheckpointChoice('Slip the guard', 0.04, cost: 300),
     CheckpointChoice('Cut through the backroad', 0.08),
   ]),
-  Checkpoint('A K9 unit is walking the checkpoint line.', [
+  Checkpoint([
+    CheckpointVariant('A K9 unit is walking the line — the dog looks bored, barely sniffing as it passes.', 0),
+    CheckpointVariant('A K9 unit is walking the line. The handler\'s alone, making small talk with drivers instead of watching the dog.', 1),
+    CheckpointVariant('A K9 unit is walking the line — the dog\'s ears are up, straining at the leash toward the trucks.', 2),
+  ], [
     CheckpointChoice('Stay in lane', 0.18),
     CheckpointChoice('Pay off the handler', 0.05, cost: 500),
     CheckpointChoice('Detour, lose an hour', 0.07),
   ]),
-  Checkpoint('Random secondary inspection zone ahead.', [
+  Checkpoint([
+    CheckpointVariant('Random secondary inspection zone ahead — they\'re only pulling every fifth vehicle.', 0),
+    CheckpointVariant('Random secondary inspection zone ahead. The inspector\'s leaning on his clipboard, looking like he\'d rather be anywhere else.', 1),
+    CheckpointVariant('Random secondary inspection zone ahead — they\'re pulling every truck apart, taking their time with each one.', 2),
+  ], [
     CheckpointChoice('Roll the dice', 0.20),
     CheckpointChoice('Bribe the inspector', 0.06, cost: 400),
     CheckpointChoice('Turn back and wait it out', 0.10),

@@ -11,7 +11,7 @@ class CupsGameScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return SideHustleGameShell(
       title: 'Find the coin',
-      instructions: 'A cup lifts to show you the coin — note its mark. Track that mark through the swap, then tap the cup you think it\'s under.',
+      instructions: 'A cup lifts to show you the coin. Track that cup through the swap, then tap the one you think it\'s under.',
       builder: (context, resolve) => _CupsGame(onResolve: resolve),
     );
   }
@@ -27,10 +27,6 @@ class _CupsGame extends StatefulWidget {
 class _CupsGameState extends State<_CupsGame> {
   static const _slotX = [0.0, 100.0, 200.0];
   static const _liftHeight = 52.0;
-  // Each cup keeps its own mark as it moves, so tracking one through the
-  // swap doesn't depend on catching every frame of motion — all three cups
-  // are otherwise identical.
-  static const _marks = ['●', '▲', '■'];
   final _rng = Random();
   late int _winningCup; // fixed identity, 0-2
   late List<int> _cupSlot; // cupSlot[cupId] = current slot index 0-2
@@ -139,11 +135,10 @@ class _CupsGameState extends State<_CupsGame> {
                           height: 60,
                           alignment: Alignment.center,
                           decoration: BoxDecoration(
-                            color: c.surfaceAlt,
+                            color: Colors.white,
                             borderRadius: BorderRadius.circular(10),
                             border: Border.all(color: _canTap ? c.line : c.lineSoft, width: 1.5),
                           ),
-                          child: Text(_marks[cupId], style: AppText.sans(size: 20, weight: FontWeight.w700, color: c.inkFaint)),
                         ),
                       ),
                     ),

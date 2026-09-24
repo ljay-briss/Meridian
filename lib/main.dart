@@ -65,6 +65,7 @@ class _RootState extends State<_Root> {
   bool _attachmentShowing = false;
   bool _tutorialBannerShowing = false;
   bool _rivalWarningShowing = false;
+  bool _shortfallShowing = false;
 
   @override
   Widget build(BuildContext context) {
@@ -85,6 +86,7 @@ class _RootState extends State<_Root> {
       _maybePromote(context, g);
       _maybeShowAttachmentWarning(context, g);
       _maybeShowRivalWarning(context, g);
+      _maybeShowShortfallNotice(context, g);
       _maybeShowTutorialBanner(context, g);
     });
 
@@ -248,6 +250,41 @@ class _RootState extends State<_Root> {
         ),
       ),
     ).then((_) => _rivalWarningShowing = false);
+  }
+
+  void _maybeShowShortfallNotice(BuildContext context, CareerController g) {
+    if (_shortfallShowing || g.shortfallNotice == null) return;
+    _shortfallShowing = true;
+    final c = AppColors.of(context);
+    final notice = g.shortfallNotice!;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18), side: BorderSide(color: c.line)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Short this week', style: AppText.sans(size: 18, weight: FontWeight.w700, color: c.neg)),
+            const SizedBox(height: 10),
+            Text(notice, style: AppText.sans(size: 13.5, weight: FontWeight.w500, color: c.inkSoft, height: 1.5)),
+            const SizedBox(height: 18),
+            AppButton(
+              kind: BtnKind.dark,
+              full: true,
+              height: 48,
+              onTap: () {
+                g.acknowledgeShortfall();
+                Navigator.pop(ctx);
+              },
+              child: const Text('Understood'),
+            ),
+          ]),
+        ),
+      ),
+    ).then((_) => _shortfallShowing = false);
   }
 
   void _maybePromote(BuildContext context, CareerController g) {

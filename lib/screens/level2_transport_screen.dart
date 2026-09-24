@@ -3,6 +3,7 @@ import '../theme.dart';
 import '../controller.dart';
 import '../data.dart';
 import '../widgets.dart';
+import 'level2_bribe_tap_screen.dart';
 
 /// Level 2 — Transporter.
 class TransportScreen extends StatelessWidget {
@@ -24,8 +25,6 @@ class TransportScreen extends StatelessWidget {
               fit: BoxFit.scaleDown,
               alignment: Alignment.centerRight,
               child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Text('STRIKES ${g.transportStrikes}/2', style: AppText.sans(size: 11, weight: FontWeight.w500, color: g.transportStrikes > 0 ? c.neg : c.ink, spacing: 0.6)),
-                const SizedBox(width: 10),
                 Text('RISK ', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink, spacing: 0.6)),
                 Text(riskLabel(g.policeHeat), style: AppText.sans(size: 11, weight: FontWeight.w600, color: riskColor(c, g.policeHeat), spacing: 0.6)),
               ]),
@@ -41,10 +40,11 @@ class TransportScreen extends StatelessWidget {
         const SizedBox(height: 6),
         Text(money(g.cash), style: AppText.mono(size: 44, weight: FontWeight.w600, color: cashColor(c, g.cash))),
         const SizedBox(height: 6),
-        Text('pay: \$3,000/run · ${g.successfulRuns} runs clean',
+        Text('pay: \$1,000/run · ${g.successfulRuns} runs clean',
             style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink)),
         Container(height: 1, color: c.lineSoft, margin: const EdgeInsets.symmetric(vertical: 26)),
-        if (g.lastWarning != null) ...[
+        // Suppressed while the result panel is up — it already says this.
+        if (g.lastWarning != null && g.lastRunOutcome == null) ...[
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(color: c.warn.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
@@ -52,7 +52,9 @@ class TransportScreen extends StatelessWidget {
           ),
           const SizedBox(height: 16),
         ],
-        if (stage == null) ...[
+        if (g.lastRunOutcome != null) ...[
+          _RunResultPanel(outcome: g.lastRunOutcome!),
+        ] else if (stage == null) ...[
           Text('The truck is loaded. Eight hours to the crossing.', style: AppText.sans(size: 15, weight: FontWeight.w500, color: c.ink, height: 1.6)),
           const SizedBox(height: 20),
           AppButton(kind: BtnKind.dark, full: true, height: 50, onTap: g.beginRun, child: const Text('Begin run')),
@@ -62,7 +64,9 @@ class TransportScreen extends StatelessWidget {
             return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text('CHECKPOINT ${stage + 1}/${kCheckpoints.length}', style: AppText.label(c.inkFaint)),
               const SizedBox(height: 10),
-              Text(checkpoint.scene, style: AppText.sans(size: 15, weight: FontWeight.w500, color: c.ink, height: 1.6)),
+              MeterBar(label: 'This run\'s risk', value: g.runRisk.clamp(0.0, 1.0) * 100, color: riskColor(c, g.runRisk.clamp(0.0, 1.0) * 100)),
+              const SizedBox(height: 18),
+              Text(g.checkpointVariantAt(stage).scene, style: AppText.sans(size: 15, weight: FontWeight.w500, color: c.ink, height: 1.6)),
               const SizedBox(height: 20),
               for (final choice in checkpoint.choices)
                 Padding(
@@ -70,7 +74,9 @@ class TransportScreen extends StatelessWidget {
                   child: AppButton(
                     kind: BtnKind.ghost,
                     full: true,
-                    onTap: g.cash >= choice.cost ? () => g.chooseCheckpoint(choice) : null,
+                    onTap: choice.cost == 0 || g.cash >= choice.cost
+                        ? () => choice.cost > 0 ? _attemptBribe(context, g, choice) : g.chooseCheckpoint(choice)
+                        : null,
                     child: Text(choice.cost > 0 ? '${choice.label} (${money(choice.cost)})' : choice.label),
                   ),
                 ),
@@ -85,5 +91,40 @@ class TransportScreen extends StatelessWidget {
         ],
       ],
     );
+  }
+}
+
+/// Sends the player through the timing-tap before actually committing to a
+/// bribe choice — a null result means they backed out of that screen
+/// without playing, so nothing is spent and the checkpoint doesn't advance.
+Future<void> _attemptBribe(BuildContext context, CareerController g, CheckpointChoice choice) async {
+  final won = await Navigator.of(context).push<bool>(MaterialPageRoute(builder: (_) => const BribeTapScreen()));
+  if (won == null) return;
+  g.chooseCheckpoint(choice, tapSucceeded: won);
+}
+
+/// The resolution beat a run ends on — clean or caught, in the player's
+/// face for a moment instead of silently updating the balance and dropping
+/// back to idle. Mirrors the win/lose panel the side-hustle minigames use.
+class _RunResultPanel extends StatelessWidget {
+  final RunOutcome outcome;
+  const _RunResultPanel({required this.outcome});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    final g = AppScope.of(context);
+    final color = outcome.caught ? c.neg : c.pos;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(outcome.caught ? 'CAUGHT' : 'CLEAN RUN', style: AppText.sans(size: 20, weight: FontWeight.w700, color: color, spacing: 1)),
+      const SizedBox(height: 12),
+      Text(signedMoney(outcome.cashDelta), style: AppText.mono(size: 34, weight: FontWeight.w700, color: color)),
+      if (outcome.caught) ...[
+        const SizedBox(height: 10),
+        Text('Had to pay your way out — no cargo, no pay this run.', style: AppText.sans(size: 13, weight: FontWeight.w500, color: c.inkSoft, height: 1.4)),
+      ],
+      const SizedBox(height: 24),
+      AppButton(kind: BtnKind.dark, full: true, height: 50, onTap: g.acknowledgeRunOutcome, child: const Text('Continue')),
+    ]);
   }
 }

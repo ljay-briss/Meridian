@@ -189,6 +189,27 @@ class MeterBar extends StatelessWidget {
   }
 }
 
+/// A cash figure that counts up/down to [value] instead of snapping, so a
+/// payout or a penalty reads as something that just happened rather than a
+/// static number that was simply different on the next frame. [styleFor]
+/// gets the live interpolated value so color (e.g. [cashColor]) can update
+/// mid-flight as it crosses zero.
+class AnimatedMoney extends StatelessWidget {
+  final num value;
+  final TextStyle Function(num v) styleFor;
+  const AnimatedMoney({super.key, required this.value, required this.styleFor});
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(end: value.toDouble()),
+      duration: const Duration(milliseconds: 600),
+      curve: Curves.easeOutCubic,
+      builder: (context, v, _) => Text(money(v.round()), style: styleFor(v)),
+    );
+  }
+}
+
 /// Promotion-progress strip for a level's home screen. Reads straight off
 /// the controller and renders nothing once there's no further promotion
 /// (level 7).
