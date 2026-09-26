@@ -258,11 +258,15 @@ class SideHustleCard extends StatelessWidget {
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const TLabel('Side hustle'),
             const SizedBox(height: 4),
-            Text('Something on the side while this settles.', style: AppText.sans(size: 12.5, weight: FontWeight.w500, color: c.inkSoft)),
+            Text(
+                g.level == 3
+                    ? 'Costs ${CareerController.sideHustleSeconds}s of the night.'
+                    : 'Something on the side while this settles.',
+                style: AppText.sans(size: 12.5, weight: FontWeight.w500, color: c.inkSoft)),
           ]),
         ),
         const SizedBox(width: 12),
-        AppButton(kind: BtnKind.ghost, onTap: () => _openSideHustle(context, g), child: const Text('Play')),
+        AppButton(kind: BtnKind.ghost, onTap: g.sideHustleAffordable ? () => _openSideHustle(context, g) : null, child: const Text('Play')),
       ]),
     );
   }

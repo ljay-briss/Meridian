@@ -7,8 +7,13 @@ import 'conversation/intents.dart';
 import 'conversation/reply_tray.dart';
 import 'conversation/vale_intents.dart';
 import 'data.dart';
+import 'theme.dart' show money;
 
 double _clamp01to100(double v) => v.clamp(0, 100).toDouble();
+
+/// Where a Level 2 checkpoint stop is in its own mini state machine —
+/// see [CareerController.checkpointPhase].
+enum CheckpointPhase { gather, approach, inspection, result }
 
 /// Picks the crew name that flavors every rival-pressure event for the run.
 String _pickRivalCrewName(Random rng) => kRivalCrewNames[rng.nextInt(kRivalCrewNames.length)];
@@ -36,7 +41,9 @@ class CareerController extends ChangeNotifier {
   // takes to clear.
   // ══════════════════════════════════════════════════════════════════════
   static const int kCleanWeeksToPromote = 2;
-  static const int kSuccessfulRunsToPromote = 4;
+  static const int kRunsPerTransporterWeek = 6;
+  static const int kTransporterWeeksToPromote = 2;
+  static const int kSuccessfulRunsToPromote = kRunsPerTransporterWeek * kTransporterWeeksToPromote;
   static const int kCollectorWeeksToPromote = 3;
   static const int kMonthsAsLeaderToPromote = 4;
   static const int kStrategicGoodCyclesToPromote = 4;
@@ -153,7 +160,7 @@ class CareerController extends ChangeNotifier {
       case 1:
         return '$cleanWeeks/$kCleanWeeksToPromote clean weeks';
       case 2:
-        return '$successfulRuns/$kSuccessfulRunsToPromote successful runs';
+        return '${successfulRuns ~/ kRunsPerTransporterWeek}/$kTransporterWeeksToPromote weeks clean';
       case 3:
         return '$collectorWeeks/$kCollectorWeeksToPromote clean weeks';
       case 4:
@@ -193,19 +200,96 @@ class CareerController extends ChangeNotifier {
   double runRisk = 0;
   int successfulRuns = 0;
   RunOutcome? lastRunOutcome;
-  // Which CheckpointVariant is in play at each checkpoint this run — rolled
-  // fresh in [beginRun] so the tell (and which choice it favors) changes run
-  // to run instead of the scene always reading the same way.
+  // Which CheckpointScenario is in play at each checkpoint this run — rolled
+  // fresh in [beginRun] so the tell (and which approach/response it favors)
+  // changes run to run instead of the scene always reading the same way.
   List<int> _runVariantIdx = [];
+  CheckpointPhase checkpointPhase = CheckpointPhase.gather;
+  bool observedThisStop = false;
+  bool checkedVehicleThisStop = false;
+  int suspicion = 0; // 0..5, resets every checkpoint
+  String? checkpointHeadline; // 'CLEAR' | 'SECONDARY INSPECTION' | 'CHECKPOINT FAILED'
+  String? checkpointBody;
+  // Rolled once per run (or forced by [prepVehicleReady]) — shared by all 3
+  // stops, since it's the same truck all the way to the crossing.
+  bool runConcealmentGood = true;
+  // Pre-run prep, bought while idle and consumed the instant a run starts —
+  // see [prepCleanDocuments] / [prepVehicle].
+  bool prepDocsClean = false;
+  bool prepVehicleReady = false;
+  bool _activeDocsClean = false;
+  static const int kPrepDocsCost = 150;
+  static const int kPrepVehicleCost = 200;
+  // Per-checkpoint-index memory of the last scenario seen there, so a
+  // repeat (or a shift change) can be called out instead of read as new —
+  // cleared whenever the level restarts (see [_initLevel2]).
+  final Map<int, String> _lastCheckpointHook = {};
 
-  /// The scene variant on offer at [stage] this run — read [CheckpointVariant]
-  /// for what "favors" means. Only valid while a run is active.
-  CheckpointVariant checkpointVariantAt(int stage) => kCheckpoints[stage].variants[_runVariantIdx[stage]];
+  /// The scenario on offer at the current stop. Only valid while a run is
+  /// active ([runStage] non-null).
+  CheckpointScenario get currentScenario => kCheckpoints[runStage!].scenarios[_runVariantIdx[runStage!]];
+
+  String get vehicleRevealText => runConcealmentGood ? kVehicleRevealGood : kVehicleRevealBad;
+
+  /// Non-null only right after landing on a stop whose scenario hook matches
+  /// what was seen at this same checkpoint index last run.
+  String? get checkpointMemoryLine {
+    if (runStage == null) return null;
+    final scenario = currentScenario;
+    if (_lastCheckpointHook[runStage!] != scenario.memoryHook) return null;
+    return scenario.memoryRepeatLine;
+  }
 
   // ── Level 3: Collector ──
   static const int collectorGapSeconds = 4; // travel time between stops
+  // The night's time budget. Every action on the route spends some of it —
+  // it doesn't tick on its own, so the player only ever loses time by
+  // choosing where to spend it (chase a stubborn payer, or move on).
+  static const int routeSeconds = 180;
+  static const int visitSeconds = 20;
+  static const int threatenSeconds = 35;
+  static const int vandalizeSeconds = 50;
+  static const int sideHustleSeconds = 30;
+  int routeSecondsLeft = routeSeconds;
+  int routeBudget = routeSeconds; // this night's total — shorter after a poor week
+  int routePenaltySeconds = 0; // carried from a poor week into the next night
+  static const int kPoorWeekTimePenalty = 20;
+  static const double kPartialWeekRatio = 0.6; // collected/expected that still counts as "close"
+  int collectorShortWeeks = 0; // short weeks this level — the boss remembers, into the next level
+
+  // Rolls and the word going around — see [visitOdds] / [threatenOdds].
+  static const double kVisitBaseOdds = 0.55;
+  static const double kThreatenBaseOdds = 0.45;
+  static const double kOnEdgeVisitPenalty = 0.15;
+  static const double kOnEdgeThreatenBonus = 0.15;
+  static const double kWatchedVisitPenalty = 0.10;
+  // Targets who've heard what happened at an earlier stop — harder to talk
+  // round, easier to scare. Cleared every night.
+  final Set<String> targetOnEdge = {};
+  // Targets an action has been taken on tonight. A rival-watched target
+  // that's never touched is one the player left alone.
+  final Set<String> targetTouched = {};
+  int routeActions = 0;
+
+  // The rival crew's hold on a watched target.
+  static const double kWatchedActionPressure = 5; // every action taken on one
+  static const double kIgnoredWatchRelief = 8; // leaving one alone all night
+
+  // Call in a favour — one per Level 3, not per night.
+  static const double kFavourSuspicion = 15;
+  bool favourUsed = false;
+
+  // The night's single curveball: null | 'police' | 'rival'.
+  static const int kLayLowSeconds = 40;
+  static const double kLayLowHeatRelief = 15;
+  static const double kKeepGoingHeat = 10;
+  static const int kConfrontSeconds = 20;
+  String? pendingCurveball;
+  String? curveballTargetId; // the target the rival crew is working (rival curveball only)
+  bool curveballFired = false;
+  int _curveballAfter = 2; // route actions in before it lands
   final Map<String, int> collected = {};
-  final Map<String, String> targetState = {}; // pending | resisting | refused | paid | lost
+  final Map<String, String> targetState = {}; // pending | resisting | refused | paid | lost | missed
   final Map<String, String> targetExcuse = {};
   int collectorWeeks = 0;
   bool collectorBusy = false; // traveling between stops — no action can be taken
@@ -368,6 +452,10 @@ class CareerController extends ChangeNotifier {
   /// just vanish on the player.
   bool get sideHustleAvailable => !gameOver;
 
+  /// On the Level 3 route a side hustle costs [sideHustleSeconds] of the
+  /// night, so it can be on offer but out of reach once time runs low.
+  bool get sideHustleAffordable => level != 3 || routeSecondsLeft >= sideHustleSeconds;
+
   /// Opens a side hustle once per waiting window — turns the pacing gaps
   /// into a small skill-based minigame instead of dead air. Picks a kind
   /// different from whichever ran last time so the same game doesn't show
@@ -375,7 +463,8 @@ class CareerController extends ChangeNotifier {
   /// screen to push; the actual win/lose call is made by the player's play
   /// in that screen, then reported back via [resolveSideHustle].
   void startSideHustle() {
-    if (!sideHustleAvailable) return;
+    if (!sideHustleAvailable || !sideHustleAffordable) return;
+    if (level == 3) routeSecondsLeft -= sideHustleSeconds;
     const kinds = SideHustleGameKind.values;
     var kind = kinds[_rng.nextInt(kinds.length)];
     if (kinds.length > 1) {
@@ -508,6 +597,8 @@ class CareerController extends ChangeNotifier {
   void acceptPromotion({String? path}) {
     if (!promotionAvailable) return;
     if (level == 3 && path != null) careerPath = path;
+    // Every short week on the route follows you up — the new boss has heard.
+    if (level == 3) cartelSuspicion = _clamp01to100(cartelSuspicion + promotionCarryOver);
     promotionAvailable = false;
     _reinitLevel(level + 1);
     notifyListeners();
@@ -774,7 +865,26 @@ class CareerController extends ChangeNotifier {
     lastWarning = null;
     lastRunOutcome = null;
     _runVariantIdx = [];
+    prepDocsClean = false;
+    prepVehicleReady = false;
+    _lastCheckpointHook.clear();
     _announce('handler', 'New job. Get the product across. Eight hours, don\'t stop for anyone.');
+  }
+
+  /// Bought while idle between runs, consumed the instant [beginRun] starts
+  /// the next one — see [_activeDocsClean] / [runConcealmentGood].
+  void prepCleanDocuments() {
+    if (level != 2 || runStage != null || prepDocsClean || cash < kPrepDocsCost) return;
+    cash -= kPrepDocsCost;
+    prepDocsClean = true;
+    notifyListeners();
+  }
+
+  void prepVehicle() {
+    if (level != 2 || runStage != null || prepVehicleReady || cash < kPrepVehicleCost) return;
+    cash -= kPrepVehicleCost;
+    prepVehicleReady = true;
+    notifyListeners();
   }
 
   void beginRun() {
@@ -783,37 +893,140 @@ class CareerController extends ChangeNotifier {
     runRisk = 0.05;
     lastWarning = null;
     lastRunOutcome = null;
-    _runVariantIdx = [for (final cp in kCheckpoints) _rng.nextInt(cp.variants.length)];
+    _runVariantIdx = [for (final cp in kCheckpoints) _rng.nextInt(cp.scenarios.length)];
+    _activeDocsClean = prepDocsClean;
+    runConcealmentGood = prepVehicleReady || _rng.nextDouble() < 0.7;
+    prepDocsClean = false;
+    prepVehicleReady = false;
+    _beginCheckpointGather();
     notifyListeners();
   }
 
-  /// [tapSucceeded] is the result of the quick timing-tap a bribe choice
-  /// (`choice.cost > 0`) sends the player through before this is called —
-  /// null for a choice that doesn't bribe anyone. A sold bribe keeps its
-  /// low listed risk; a fumbled one draws more attention than just driving
-  /// through would have, on top of the money already being gone either way.
-  void chooseCheckpoint(CheckpointChoice choice, {bool? tapSucceeded}) {
-    if (level != 2 || runStage == null) return;
+  void _beginCheckpointGather() {
+    checkpointPhase = CheckpointPhase.gather;
+    observedThisStop = false;
+    checkedVehicleThisStop = false;
+    suspicion = 0;
+    checkpointHeadline = null;
+    checkpointBody = null;
+  }
+
+  /// Reveals [CheckpointScenario.observeReveal] — a free but not-quite-free
+  /// look: the same small risk nudge as [checkVehicle], for lingering at
+  /// the checkpoint instead of just driving up to it.
+  void observeCheckpoint() {
+    if (level != 2 || runStage == null || checkpointPhase != CheckpointPhase.gather || observedThisStop) return;
+    observedThisStop = true;
+    runRisk += 0.01;
+    notifyListeners();
+  }
+
+  void checkVehicle() {
+    if (level != 2 || runStage == null || checkpointPhase != CheckpointPhase.gather || checkedVehicleThisStop) return;
+    checkedVehicleThisStop = true;
+    runRisk += 0.01;
+    notifyListeners();
+  }
+
+  /// CONTINUE — skip whatever information wasn't already gathered and move
+  /// straight to picking an approach.
+  void proceedToApproach() {
+    if (level != 2 || runStage == null || checkpointPhase != CheckpointPhase.gather) return;
+    checkpointPhase = CheckpointPhase.approach;
+    notifyListeners();
+  }
+
+  /// Commits to [approach] for the current stop. Its own risk/heat apply
+  /// immediately; if it doesn't skip the inspection outright, whether one
+  /// actually happens is rolled from [CheckpointApproach.baseInspectionChance]
+  /// nudged by the scenario's [CheckpointKind].
+  void chooseApproach(CheckpointApproach approach) {
+    if (level != 2 || runStage == null || checkpointPhase != CheckpointPhase.approach) return;
+    if (cash < approach.cost) return;
     final checkpoint = kCheckpoints[runStage!];
-    if (choice.cost > 0) {
-      if (cash < choice.cost) return;
-      cash -= choice.cost;
+    if (approach.cost > 0) {
+      cash -= approach.cost;
       recentStoryEvent = 'bribed';
     }
-    // Reading the checkpoint's tell right and picking the choice it favors
-    // earns a discount on top of whatever the choice already offers — the
+    // Reading the scenario's tell right and picking the approach it favors
+    // earns a discount on top of whatever the approach already offers — the
     // only reward for paying attention, no cash required.
-    final favoredIndex = checkpointVariantAt(runStage!).favoredChoiceIndex;
-    final matchedTell = checkpoint.choices.indexOf(choice) == favoredIndex;
-    var delta = matchedTell ? choice.riskDelta * 0.4 : choice.riskDelta;
-    if (choice.cost > 0) {
-      delta = tapSucceeded == true ? delta * 0.75 : delta + 0.20;
+    final matchedTell = checkpoint.approaches.indexOf(approach) == currentScenario.favoredApproachIndex;
+    runRisk += matchedTell ? approach.riskDelta * 0.5 : approach.riskDelta;
+    if (approach.heatDelta > 0) rivalPressure = _clamp01to100(rivalPressure + approach.heatDelta);
+    if (approach.skipsInspection) {
+      _resolveCheckpointClear();
+      notifyListeners();
+      return;
     }
-    runRisk += delta;
+    final kindBump = switch (currentScenario.kind) {
+      CheckpointKind.heightened => 0.25,
+      CheckpointKind.trap => 0.15,
+      CheckpointKind.unusual => 0.10,
+      CheckpointKind.routine => 0.0,
+    };
+    final chance = (approach.baseInspectionChance + kindBump).clamp(0.0, 1.0);
+    if (_rng.nextDouble() < chance) {
+      checkpointPhase = CheckpointPhase.inspection;
+    } else {
+      _resolveCheckpointClear();
+    }
+    notifyListeners();
+  }
+
+  /// Answers the officer's question during an inspection sub-scene. How
+  /// [response] plays depends on whether it matches the scenario's favored
+  /// response, the run's concealment roll, and how tense this stop already
+  /// is — not on the label alone, so there's no single "correct" tap.
+  void respondToInspection(InspectionResponse response) {
+    if (level != 2 || runStage == null || checkpointPhase != CheckpointPhase.inspection) return;
+    final checkpoint = kCheckpoints[runStage!];
+    final scenario = currentScenario;
+    final matchedTell = checkpoint.responses.indexOf(response) == scenario.favoredResponseIndex;
+    final kindBump = (scenario.kind == CheckpointKind.heightened || scenario.kind == CheckpointKind.trap) ? 1 : 0;
+    final concealmentMod = runConcealmentGood ? -1 : 1;
+    suspicion = (response.suspicionDelta + (matchedTell ? -2 : 0) + concealmentMod + kindBump + (_activeDocsClean ? -1 : 0))
+        .clamp(0, 5);
+    if (suspicion < 3) {
+      _resolveCheckpointClear();
+      notifyListeners();
+      return;
+    }
+    runRisk += 0.15;
+    policeHeat = _clamp01to100(policeHeat + 3);
+    checkpointPhase = CheckpointPhase.result;
+    if (suspicion >= 5 && _rng.nextDouble() < 0.4) {
+      checkpointHeadline = 'CHECKPOINT FAILED';
+      checkpointBody = 'They pulled the truck apart right there.';
+      runRisk = 0.95; // the end-of-run roll still clamps to 0.85 — a sliver of a chance, same as any other run
+    } else {
+      checkpointHeadline = 'SECONDARY INSPECTION';
+      checkpointBody = 'They waved you through, but not before a much closer look.';
+    }
+    notifyListeners();
+  }
+
+  void _resolveCheckpointClear() {
+    checkpointPhase = CheckpointPhase.result;
+    checkpointHeadline = 'CLEAR';
+    checkpointBody = 'Through without a second look.';
+  }
+
+  /// Dismisses the current stop's result panel — either lands on the next
+  /// checkpoint's gather phase, or (last checkpoint, or a failed one) rolls
+  /// the run's actual outcome via [_resolveRun].
+  void advanceCheckpoint() {
+    if (level != 2 || runStage == null || checkpointPhase != CheckpointPhase.result) return;
+    _lastCheckpointHook[runStage!] = currentScenario.memoryHook;
+    if (checkpointHeadline == 'CHECKPOINT FAILED') {
+      _resolveRun();
+      return;
+    }
     runStage = runStage! + 1;
     if (runStage! >= kCheckpoints.length) {
       _resolveRun();
     } else {
+      _beginCheckpointGather();
       notifyListeners();
     }
   }
@@ -869,19 +1082,37 @@ class CareerController extends ChangeNotifier {
     _strategicGapTimer?.cancel();
     _dayTimer?.cancel();
     level = 3;
+    collectorWeeks = 0;
+    collectorShortWeeks = 0;
+    routePenaltySeconds = 0;
+    favourUsed = false;
+    collectorBusy = false;
+    actionInFlight = false;
+    shortfallNotice = null;
+    targetPaidStreak.clear();
+    targetUnderRivalWatch.clear();
+    _startNight();
+    _announce('handler', 'Route\'s the same every week. Come back short and it\'s on you.');
+  }
+
+  /// Resets everything that only lives for one night's route — target
+  /// states, the clock, the word going around, and the night's curveball.
+  void _startNight() {
     collected.clear();
     targetState.clear();
     targetExcuse.clear();
     for (final t in kCollectionRoute) {
       targetState[t.id] = 'pending';
     }
-    collectorWeeks = 0;
-    collectorBusy = false;
-    actionInFlight = false;
-    shortfallNotice = null;
-    targetPaidStreak.clear();
-    targetUnderRivalWatch.clear();
-    _announce('handler', 'Route\'s the same every week. Come back short and it\'s on you.');
+    targetOnEdge.clear();
+    targetTouched.clear();
+    routeBudget = routeSeconds - routePenaltySeconds;
+    routeSecondsLeft = routeBudget;
+    routeActions = 0;
+    curveballFired = false;
+    pendingCurveball = null;
+    curveballTargetId = null;
+    _curveballAfter = 2 + _rng.nextInt(2);
   }
 
   /// What a target actually pays out — full price, unless the rival crew
@@ -890,6 +1121,59 @@ class CareerController extends ChangeNotifier {
 
   int get expectedTotal => kCollectionRoute.fold(0, (a, t) => a + effectiveOwed(t));
   int get collectedTotal => collected.values.fold(0, (a, v) => a + v);
+
+  bool canAffordRouteTime(int seconds) => routeSecondsLeft >= seconds;
+
+  /// True once no target still in play (pending or resisting) has an action
+  /// the remaining night can pay for — the route can't advance any further,
+  /// so the player has to report in with whatever they've got.
+  bool get routeStalled => !kCollectionRoute.any((t) {
+        switch (targetState[t.id]) {
+          case 'pending':
+            return canAffordRouteTime(visitSeconds);
+          case 'resisting':
+            return canAffordRouteTime(threatenSeconds);
+          default:
+            return false;
+        }
+      });
+
+  bool _spendRouteTime(int seconds) {
+    if (!canAffordRouteTime(seconds)) return false;
+    routeSecondsLeft -= seconds;
+    return true;
+  }
+
+  // ── Odds the player can read off the card ──
+
+  /// Chance a plain visit gets paid. Everything that moves it is shown on
+  /// the target's card, so the order the player works the route in is a
+  /// choice they can reason about, not a hidden roll.
+  double visitOdds(String targetId) {
+    var p = kVisitBaseOdds;
+    if (targetUnderRivalWatch.contains(targetId)) p -= kWatchedVisitPenalty;
+    if (targetOnEdge.contains(targetId)) p -= kOnEdgeVisitPenalty;
+    if (rivalPressure >= 60) {
+      p -= 0.10;
+    } else if (rivalPressure >= 40) {
+      p -= 0.05;
+    }
+    return p.clamp(0.15, 0.85);
+  }
+
+  /// Chance a threat lands — a target that's heard what happened down the
+  /// road is easier to scare.
+  double threatenOdds(String targetId) => (kThreatenBaseOdds + (targetOnEdge.contains(targetId) ? kOnEdgeThreatenBonus : 0)).clamp(0.15, 0.85);
+
+  // ── Locks ──
+
+  /// Nothing on the route can be done while the player owes a decision, or
+  /// while the previous stop is still being driven away from.
+  bool get _routeBlocked => collectorBusy || pendingCurveball != null || pendingRivalWarning != null;
+
+  /// What the UI reads to disable every action — also covers the moment
+  /// between the tap and the roll, when a second tap must not land.
+  bool get collectorLocked => _routeBlocked || actionInFlight;
 
   // Travel time to/from a stop — locks every action on the route until it
   // clears, so a week can't be cleared in a handful of instant taps.
@@ -908,7 +1192,7 @@ class CareerController extends ChangeNotifier {
   /// [endCollectorAction] right before the real call, which then re-locks
   /// via [_startCollectorGap] once it resolves.
   void beginCollectorAction() {
-    if (level != 3 || collectorBusy || actionInFlight) return;
+    if (level != 3 || collectorLocked) return;
     actionInFlight = true;
     notifyListeners();
   }
@@ -919,11 +1203,33 @@ class CareerController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Bookkeeping every resolved route action shares: the target has been
+  /// touched, the rival watches for it, violence spreads word to the rest
+  /// of the route, and the night may throw its curveball.
+  void _finishRouteAction(String targetId, {bool violent = false}) {
+    targetTouched.add(targetId);
+    routeActions += 1;
+    if (targetUnderRivalWatch.contains(targetId)) {
+      rivalPressure = _clamp01to100(rivalPressure + kWatchedActionPressure);
+    }
+    if (violent) {
+      // Whoever hasn't been visited yet hears about it before you arrive.
+      for (final t in kCollectionRoute) {
+        if (t.id != targetId && targetState[t.id] == 'pending') targetOnEdge.add(t.id);
+      }
+    }
+    _maybeTriggerRivalWarning();
+    _maybeTriggerCurveball();
+    _startCollectorGap();
+    notifyListeners();
+  }
+
   void visit(String targetId) {
-    if (level != 3 || collectorBusy) return;
+    if (level != 3 || _routeBlocked) return;
     if (targetState[targetId] != 'pending') return;
+    if (!_spendRouteTime(visitSeconds)) return;
     final target = kCollectionRoute.firstWhere((t) => t.id == targetId);
-    if (_rng.nextDouble() < 0.55) {
+    if (_rng.nextDouble() < visitOdds(targetId)) {
       collected[targetId] = effectiveOwed(target);
       targetState[targetId] = 'paid';
     } else {
@@ -932,15 +1238,15 @@ class CareerController extends ChangeNotifier {
     }
     policeHeat = _clamp01to100(policeHeat + 1.5);
     cartelSuspicion = _clamp01to100(cartelSuspicion + 1);
-    _startCollectorGap();
-    notifyListeners();
+    _finishRouteAction(targetId);
   }
 
   void threaten(String targetId) {
-    if (level != 3 || collectorBusy) return;
+    if (level != 3 || _routeBlocked) return;
     if (targetState[targetId] != 'resisting') return;
+    if (!_spendRouteTime(threatenSeconds)) return;
     final target = kCollectionRoute.firstWhere((t) => t.id == targetId);
-    if (_rng.nextDouble() < 0.45) {
+    if (_rng.nextDouble() < threatenOdds(targetId)) {
       collected[targetId] = effectiveOwed(target);
       targetState[targetId] = 'paid';
     } else {
@@ -949,14 +1255,14 @@ class CareerController extends ChangeNotifier {
     }
     cartelSuspicion = _clamp01to100(cartelSuspicion + 2);
     rivalPressure = _clamp01to100(rivalPressure + 3);
-    _startCollectorGap();
-    notifyListeners();
+    _finishRouteAction(targetId, violent: true);
   }
 
   void vandalize(String targetId, {required bool now}) {
-    if (level != 3 || collectorBusy) return;
+    if (level != 3 || _routeBlocked) return;
     final state = targetState[targetId];
     if (state != 'resisting' && state != 'refused') return;
+    if (!_spendRouteTime(vandalizeSeconds)) return;
     final target = kCollectionRoute.firstWhere((t) => t.id == targetId);
     recentStoryEvent = 'crew_violence';
     threads['crew']!.add(Message('${target.name}, ${now ? 'now' : 'tonight'}.', true));
@@ -981,7 +1287,96 @@ class CareerController extends ChangeNotifier {
       _lastCrewLine = line;
     }
     unread = true;
-    _startCollectorGap();
+    _finishRouteAction(targetId, violent: true);
+  }
+
+  // ── Call in a favour ──
+
+  bool get favourAvailable => level == 3 && !favourUsed;
+
+  /// Suspicion the player carries into Level 4 for the short weeks they had
+  /// on the route (4 each, capped at 15).
+  double get promotionCarryOver => min(15.0, collectorShortWeeks * 4.0);
+
+  /// Targets a favour can still be spent on.
+  List<CollectionTarget> get favourTargets => [
+        for (final t in kCollectionRoute)
+          if (const {'pending', 'resisting', 'refused'}.contains(targetState[t.id])) t,
+      ];
+
+  /// The emergency button: once per Level 3, any target still holding out
+  /// pays in full — for a real jump in cartel suspicion.
+  void callInFavour(String targetId) {
+    if (!favourAvailable || _routeBlocked) return;
+    if (!favourTargets.any((t) => t.id == targetId)) return;
+    final target = kCollectionRoute.firstWhere((t) => t.id == targetId);
+    favourUsed = true;
+    collected[targetId] = effectiveOwed(target);
+    targetState[targetId] = 'paid';
+    targetExcuse.remove(targetId);
+    targetTouched.add(targetId);
+    cartelSuspicion = _clamp01to100(cartelSuspicion + kFavourSuspicion);
+    _announce('handler', 'Word came down that ${target.name} would be square. Somebody up the chain owes you nothing now — and knows you asked.');
+    notifyListeners();
+  }
+
+  // ── The night's curveball ──
+
+  /// One major event per night's route, once the player is a couple of
+  /// stops in. It reflects how the night has gone: if the rival crew is
+  /// hotter than the police, they're the ones who turn up.
+  void _maybeTriggerCurveball() {
+    if (curveballFired || pendingCurveball != null || pendingRivalWarning != null) return;
+    if (routeActions < _curveballAfter) return;
+    final inPlay = [
+      for (final t in kCollectionRoute)
+        if (targetState[t.id] == 'pending' || targetState[t.id] == 'resisting') t,
+    ];
+    if (inPlay.isEmpty) return;
+    curveballFired = true;
+    final open = inPlay.where((t) => !targetUnderRivalWatch.contains(t.id)).toList()..sort((a, b) => b.owed.compareTo(a.owed));
+    if (rivalPressure > policeHeat && open.isNotEmpty) {
+      pendingCurveball = 'rival';
+      curveballTargetId = open.first.id;
+      _announce('handler', '$rivalCrewName are working ${open.first.name} right now. Your call.');
+    } else {
+      pendingCurveball = 'police';
+      curveballTargetId = null;
+      _announce('handler', 'Patrol car keeps circling your route. Don\'t get made.');
+    }
+  }
+
+  /// Police: `lay_low` | `keep_going`. Rival: `confront` | `let_go`.
+  void resolveCurveball(String choice) {
+    final kind = pendingCurveball;
+    if (kind == null) return;
+    if (kind == 'police') {
+      if (choice == 'lay_low') {
+        routeSecondsLeft = max(0, routeSecondsLeft - kLayLowSeconds);
+        policeHeat = _clamp01to100(policeHeat - kLayLowHeatRelief);
+      } else {
+        policeHeat = _clamp01to100(policeHeat + kKeepGoingHeat);
+        cartelSuspicion = _clamp01to100(cartelSuspicion + 2);
+      }
+    } else {
+      final id = curveballTargetId;
+      if (choice == 'confront') {
+        routeSecondsLeft = max(0, routeSecondsLeft - kConfrontSeconds);
+        if (_rng.nextDouble() < 0.5) {
+          rivalPressure = _clamp01to100(rivalPressure - 10);
+        } else {
+          if (id != null) targetUnderRivalWatch.add(id);
+          rivalPressure = _clamp01to100(rivalPressure + 8);
+          policeHeat = _clamp01to100(policeHeat + 5);
+        }
+      } else {
+        // Let them have their cut — they skim the target, and stand down.
+        if (id != null) targetUnderRivalWatch.add(id);
+        rivalPressure = _clamp01to100(rivalPressure - 6);
+      }
+    }
+    pendingCurveball = null;
+    curveballTargetId = null;
     notifyListeners();
   }
 
@@ -1004,19 +1399,55 @@ class CareerController extends ChangeNotifier {
   }
 
   void reportToBoss() {
-    if (level != 3 || collectorBusy) return;
-    if (targetState.values.any((s) => s == 'pending' || s == 'resisting')) return;
-    final shortfall = expectedTotal - collectedTotal;
+    if (level != 3 || _routeBlocked) return;
+    // The player can call it a night any time — moving on from a target that
+    // won't pay is a choice, not something the level forbids. Whatever they
+    // leave unfinished (or the clock ran out on) pays nothing.
+    for (final t in kCollectionRoute) {
+      final s = targetState[t.id];
+      if (s == 'pending' || s == 'resisting') targetState[t.id] = 'missed';
+    }
+    final expected = expectedTotal;
+    final got = collectedTotal;
+    final shortfall = expected - got;
     if (shortfall > 0) {
-      // Short weeks don't pay, and the gap comes out of the player's own
-      // pocket instead of ending the career outright — allowed to push cash
-      // negative, same as every other "caught" cost in the game.
-      cash -= shortfall;
-      cartelSuspicion = _clamp01to100(cartelSuspicion + 10);
-      shortfallNotice = 'Came up \$$shortfall short this week. The boss doesn\'t care why — it came out of your own pocket.';
+      // A short week isn't the end of the career — how bad it was decides
+      // what it costs. Cash is allowed to go negative, same as every other
+      // "caught" cost in the game.
+      collectorShortWeeks += 1;
+      final ratio = expected == 0 ? 1.0 : got / expected;
+      if (ratio >= kPartialWeekRatio) {
+        // Close enough that the boss splits the gap with you.
+        final owed = (shortfall / 2).ceil();
+        cash -= owed;
+        cartelSuspicion = _clamp01to100(cartelSuspicion + 5);
+        routePenaltySeconds = 0;
+        shortfallNotice = 'Expected ${money(expected)}. Collected ${money(got)}. '
+            'Close, but not enough — the boss took half the gap (${money(owed)}) out of your own pocket.';
+        _announce('handler', 'Boss says you\'re close. "Close" doesn\'t pay him.');
+      } else {
+        cash -= shortfall;
+        cartelSuspicion = _clamp01to100(cartelSuspicion + 12);
+        routePenaltySeconds = kPoorWeekTimePenalty;
+        shortfallNotice = 'Expected ${money(expected)}. Collected ${money(got)}. '
+            'The whole ${money(shortfall)} gap came out of your own pocket — and next week\'s route gets ${kPoorWeekTimePenalty}s less night to work with.';
+        _announce('handler', 'Boss isn\'t happy. He\'s cutting your leash next week.');
+      }
     } else {
       cash += 1500;
       collectorWeeks += 1;
+      routePenaltySeconds = 0;
+    }
+    // A watched target left completely alone is one the rival crew stops
+    // bothering about — pressure eases, and if it's low enough they lose
+    // interest in that target altogether.
+    for (final t in kCollectionRoute) {
+      if (!targetUnderRivalWatch.contains(t.id) || targetTouched.contains(t.id)) continue;
+      rivalPressure = _clamp01to100(rivalPressure - kIgnoredWatchRelief);
+      if (rivalPressure < 25) {
+        targetUnderRivalWatch.remove(t.id);
+        _announce('handler', '$rivalCrewName have moved on from ${t.name}. Nobody\'s skimming it now.');
+      }
     }
     // A target paid reliably enough, enough weeks running, and the rival
     // crew notices the pattern — persistent, not just this week's roll.
@@ -1028,11 +1459,7 @@ class CareerController extends ChangeNotifier {
       }
     }
     _maybeTriggerFactionNotice();
-    collected.clear();
-    for (final t in kCollectionRoute) {
-      targetState[t.id] = 'pending';
-    }
-    targetExcuse.clear();
+    _startNight();
     if (_checkExposure()) return;
     _tickPersonalRelationships();
     if (collectorWeeks >= kCollectorWeeksToPromote) promotionAvailable = true;

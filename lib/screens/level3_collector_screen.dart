@@ -13,7 +13,8 @@ class CollectorScreen extends StatelessWidget {
     final g = AppScope.of(context);
     final c = AppColors.of(context);
     final allResolved = kCollectionRoute.every((t) => g.targetState[t.id] != 'pending' && g.targetState[t.id] != 'resisting');
-    final locked = g.collectorBusy || g.actionInFlight;
+    final nightOver = !allResolved && g.routeStalled;
+    final locked = g.collectorLocked;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
@@ -34,6 +35,10 @@ class CollectorScreen extends StatelessWidget {
         Text('collected ${money(g.collectedTotal)} / ${money(g.expectedTotal)} owed this week',
             style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink)),
         Container(height: 1, color: c.lineSoft, margin: const EdgeInsets.symmetric(vertical: 22)),
+        const _NightClock(),
+        const SizedBox(height: 14),
+        const _FavourCard(),
+        const SizedBox(height: 14),
         if (g.sideHustleAvailable) ...[
           const SideHustleCard(),
           const SizedBox(height: 14),
@@ -47,10 +52,139 @@ class CollectorScreen extends StatelessWidget {
           kind: BtnKind.dark,
           full: true,
           height: 50,
-          onTap: allResolved && !locked ? g.reportToBoss : null,
-          child: Text(locked ? 'On the road…' : 'Report to the boss'),
+          onTap: locked ? null : g.reportToBoss,
+          child: Text(locked
+              ? 'On the road…'
+              : allResolved
+                  ? 'Report to the boss'
+                  : nightOver
+                      ? 'Night\'s over — report in'
+                      : 'Call it a night'),
         ),
+        if (!allResolved && !locked) ...[
+          const SizedBox(height: 8),
+          Text('Stops you haven\'t finished pay nothing, and the gap comes out of your pocket.',
+              textAlign: TextAlign.center, style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.inkFaint, height: 1.4)),
+        ],
       ],
+    );
+  }
+}
+
+String _clock(int seconds) => '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
+
+/// The night's remaining time budget — every action spends some of it, so
+/// the player has to decide who's worth chasing and who to leave behind.
+class _NightClock extends StatelessWidget {
+  const _NightClock();
+
+  @override
+  Widget build(BuildContext context) {
+    final g = AppScope.of(context);
+    final c = AppColors.of(context);
+    final left = g.routeSecondsLeft;
+    final timesUp = g.routeStalled && g.targetState.values.any((s) => s == 'pending' || s == 'resisting');
+    final color = left < 30 ? c.neg : left < 60 ? c.warn : c.ink;
+    return AppCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, crossAxisAlignment: CrossAxisAlignment.end, children: [
+          Text('NIGHT REMAINING', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink, spacing: 1.2)),
+          AnimatedDefaultTextStyle(
+            duration: const Duration(milliseconds: 250),
+            style: AppText.mono(size: 26, weight: FontWeight.w700, color: color),
+            child: Text(_clock(left)),
+          ),
+        ]),
+        const SizedBox(height: 8),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(3),
+          child: Container(
+            height: 6,
+            color: c.lineSoft,
+            alignment: Alignment.centerLeft,
+            child: AnimatedFractionallySizedBox(
+              duration: const Duration(milliseconds: 250),
+              widthFactor: (left / g.routeBudget).clamp(0.0, 1.0),
+              child: Container(color: color),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Visit −${CareerController.visitSeconds}s · Threaten −${CareerController.threatenSeconds}s · '
+          'Vandalize −${CareerController.vandalizeSeconds}s · Side hustle −${CareerController.sideHustleSeconds}s',
+          style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.inkFaint, height: 1.4),
+        ),
+        if (g.routePenaltySeconds > 0) ...[
+          const SizedBox(height: 6),
+          Text('The boss cut ${g.routePenaltySeconds}s off tonight after last week\'s shortfall.',
+              style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.warn, height: 1.4)),
+        ],
+        if (timesUp) ...[
+          const SizedBox(height: 6),
+          Text('Time\'s up — anyone you didn\'t reach pays nothing. Report in with what you\'ve got.',
+              style: AppText.sans(size: 11.5, weight: FontWeight.w600, color: c.neg, height: 1.4)),
+        ],
+      ]),
+    );
+  }
+}
+
+/// The one-shot emergency resource — obvious, priced, and gone once spent.
+class _FavourCard extends StatelessWidget {
+  const _FavourCard();
+
+  void _pick(BuildContext context, CareerController g) {
+    showAppSheet(context, 'Call in a favour', (ctx) {
+      final c = AppColors.of(ctx);
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Who cooperates? They\'ll pay in full. Cost: +${CareerController.kFavourSuspicion.round()} suspicion. You only get one.',
+            style: AppText.sans(size: 13.5, weight: FontWeight.w500, color: c.inkSoft, height: 1.5)),
+        const SizedBox(height: 16),
+        for (final t in g.favourTargets) ...[
+          AppButton(
+            kind: BtnKind.ghost,
+            full: true,
+            onTap: () {
+              Navigator.pop(ctx);
+              g.callInFavour(t.id);
+            },
+            child: Text('${t.name} — ${money(g.effectiveOwed(t))}'),
+          ),
+          const SizedBox(height: 10),
+        ],
+      ]);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final g = AppScope.of(context);
+    final c = AppColors.of(context);
+    final used = g.favourUsed;
+    final canUse = !used && !g.collectorLocked && g.favourTargets.isNotEmpty;
+    return AppCard(
+      padding: const EdgeInsets.all(14),
+      child: Row(children: [
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+              Text('CALL IN A FAVOUR', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink, spacing: 1.2)),
+              AppChip(tone: used ? ChipTone.neg : ChipTone.warn, child: Text(used ? 'USED' : '1 LEFT')),
+            ]),
+            const SizedBox(height: 4),
+            Text(
+              used
+                  ? 'Spent. No more favours this level.'
+                  : 'A target still holding out will pay in full. Cost: +${CareerController.kFavourSuspicion.round()} suspicion. One use per level.',
+              style: AppText.sans(size: 12, weight: FontWeight.w500, color: c.inkSoft, height: 1.4),
+            ),
+          ]),
+        ),
+        const SizedBox(width: 12),
+        AppButton(kind: BtnKind.ghost, onTap: canUse ? () => _pick(context, g) : null, child: const Text('Use')),
+      ]),
     );
   }
 }
@@ -87,6 +221,7 @@ class _TargetCardState extends State<_TargetCard> {
     final suspicionBefore = g.cartelSuspicion;
     final rivalBefore = g.rivalPressure;
     final collectedBefore = g.collected[widget.target.id] ?? 0;
+    final timeBefore = g.routeSecondsLeft;
 
     g.endCollectorAction();
     action(); // the real visit/threaten/vandalize call — resolves synchronously
@@ -96,6 +231,7 @@ class _TargetCardState extends State<_TargetCard> {
         MapEntry('HEAT', (g.policeHeat - heatBefore).round()),
         MapEntry('SUSPICION', (g.cartelSuspicion - suspicionBefore).round()),
         MapEntry('RIVAL', (g.rivalPressure - rivalBefore).round()),
+        MapEntry('TIME', g.routeSecondsLeft - timeBefore),
       ])
         if (e.value != 0) e,
     ];
@@ -125,7 +261,8 @@ class _TargetCardState extends State<_TargetCard> {
     showAppSheet(context, 'Text the crew', (ctx) {
       final c = AppColors.of(ctx);
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('${target.name} — pick the time.', style: AppText.sans(size: 13.5, weight: FontWeight.w500, color: c.inkSoft, height: 1.5)),
+        Text('${target.name} — pick the time. Costs ${CareerController.vandalizeSeconds}s of the night either way.',
+            style: AppText.sans(size: 13.5, weight: FontWeight.w500, color: c.inkSoft, height: 1.5)),
         const SizedBox(height: 16),
         AppButton(
           kind: BtnKind.ghost,
@@ -156,23 +293,50 @@ class _TargetCardState extends State<_TargetCard> {
     final c = AppColors.of(context);
     final target = widget.target;
     final state = g.targetState[target.id] ?? 'pending';
-    final locked = g.collectorBusy || g.actionInFlight;
+    final locked = g.collectorLocked;
     final underRivalWatch = g.targetUnderRivalWatch.contains(target.id);
+    final onEdge = g.targetOnEdge.contains(target.id);
+    final open = state == 'pending' || state == 'resisting';
+    final oddsLine = state == 'pending'
+        ? 'Visit odds ${(g.visitOdds(target.id) * 100).round()}%'
+        : 'Threaten odds ${(g.threatenOdds(target.id) * 100).round()}%';
 
     return AppCard(
       padding: const EdgeInsets.all(14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(target.name, style: AppText.sans(size: 14.5, weight: FontWeight.w600, color: c.ink)),
-            Text('${target.kind} · owes ${money(g.effectiveOwed(target))}', style: AppText.sans(size: 11.5, weight: FontWeight.w500, color: c.inkFaint)),
-            if (underRivalWatch) ...[
-              const SizedBox(height: 4),
-              // The lasting mark a rival crew noticing this target's pattern
-              // leaves behind — visible every week, not just the once.
-              AppChip(tone: ChipTone.warn, child: Text('${g.rivalCrewName.toUpperCase()} SKIMS THIS ONE')),
-            ],
-          ]),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(target.name, style: AppText.sans(size: 14.5, weight: FontWeight.w600, color: c.ink)),
+              Text('${target.kind} · owes ${money(g.effectiveOwed(target))}', style: AppText.sans(size: 11.5, weight: FontWeight.w500, color: c.inkFaint)),
+              if (open && (underRivalWatch || onEdge)) ...[
+                const SizedBox(height: 6),
+                Wrap(spacing: 6, runSpacing: 6, children: [
+                  // The rival crew's hold on this target — every action taken
+                  // here feeds their pressure, and it makes the visit harder.
+                  if (underRivalWatch) const AppChip(tone: ChipTone.warn, child: Text('RIVAL CREW IS WATCHING')),
+                  // Word of an earlier threat or vandalism reached this stop.
+                  if (onEdge) const AppChip(tone: ChipTone.warn, child: Text('ON EDGE')),
+                ]),
+              ] else if (underRivalWatch) ...[
+                const SizedBox(height: 4),
+                // The lasting mark a rival crew noticing this target's pattern
+                // leaves behind — visible every week, not just the once.
+                AppChip(tone: ChipTone.warn, child: Text('${g.rivalCrewName.toUpperCase()} SKIMS THIS ONE')),
+              ],
+              if (open) ...[
+                const SizedBox(height: 6),
+                Text(oddsLine, style: AppText.sans(size: 11.5, weight: FontWeight.w600, color: c.inkSoft, height: 1.4)),
+                if (underRivalWatch)
+                  Text('Every action here adds +${CareerController.kWatchedActionPressure.round()} rival heat.',
+                      style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.inkFaint, height: 1.4)),
+                if (onEdge)
+                  Text('Word got around — visit −${(CareerController.kOnEdgeVisitPenalty * 100).round()}%, threats +${(CareerController.kOnEdgeThreatenBonus * 100).round()}%.',
+                      style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.inkFaint, height: 1.4)),
+              ],
+            ]),
+          ),
+          const SizedBox(width: 8),
           // A little pop on every state change — paying off a card should
           // feel like something happened, not just a label swap.
           AnimatedSwitcher(
@@ -234,11 +398,20 @@ class _RestingBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
+    final g = AppScope.of(context);
+    final canThreaten = g.canAffordRouteTime(CareerController.threatenSeconds);
+    final canVandalize = g.canAffordRouteTime(CareerController.vandalizeSeconds);
+    final canVisit = g.canAffordRouteTime(CareerController.visitSeconds);
     switch (state) {
       case 'paid':
         return Padding(
           padding: const EdgeInsets.only(top: 10),
           child: Text('+${money(collected ?? effectiveOwed)}', style: AppText.mono(size: 20, weight: FontWeight.w700, color: c.pos)),
+        );
+      case 'missed':
+        return Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Text('The night ran out before you got here.', style: AppText.sans(size: 12.5, weight: FontWeight.w500, color: c.inkFaint, height: 1.4)),
         );
       case 'lost':
         return Padding(
@@ -252,21 +425,39 @@ class _RestingBody extends StatelessWidget {
             Text('"$excuse"', style: AppText.sans(size: 13, weight: FontWeight.w500, color: c.inkSoft, height: 1.4)),
             const SizedBox(height: 10),
             Row(children: [
-              Expanded(child: AppButton(kind: BtnKind.ghost, full: true, onTap: locked ? null : onThreaten, child: const Text('Threaten'))),
+              Expanded(
+                  child: AppButton(
+                      kind: BtnKind.ghost,
+                      full: true,
+                      onTap: locked || !canThreaten ? null : onThreaten,
+                      child: const Text('Threaten · ${CareerController.threatenSeconds}s'))),
               const SizedBox(width: 8),
-              Expanded(child: AppButton(kind: BtnKind.ghost, full: true, onTap: locked ? null : onVandalize, child: const Text('Vandalize'))),
+              Expanded(
+                  child: AppButton(
+                      kind: BtnKind.ghost,
+                      full: true,
+                      onTap: locked || !canVandalize ? null : onVandalize,
+                      child: const Text('Vandalize · ${CareerController.vandalizeSeconds}s'))),
             ]),
           ]),
         );
       case 'refused':
         return Padding(
           padding: const EdgeInsets.only(top: 10),
-          child: AppButton(kind: BtnKind.ghost, full: true, onTap: locked ? null : onVandalize, child: const Text('Vandalize')),
+          child: AppButton(
+              kind: BtnKind.ghost,
+              full: true,
+              onTap: locked || !canVandalize ? null : onVandalize,
+              child: const Text('Vandalize · ${CareerController.vandalizeSeconds}s')),
         );
       default: // pending
         return Padding(
           padding: const EdgeInsets.only(top: 10),
-          child: AppButton(kind: BtnKind.dark, full: true, onTap: locked ? null : onVisit, child: Text(locked ? 'On the road…' : 'Visit')),
+          child: AppButton(
+              kind: BtnKind.dark,
+              full: true,
+              onTap: locked || !canVisit ? null : onVisit,
+              child: Text(locked ? 'On the road…' : 'Visit · ${CareerController.visitSeconds}s')),
         );
     }
   }
@@ -345,7 +536,8 @@ class _BeatResult extends StatelessWidget {
         if (consequences.isNotEmpty) ...[
           const SizedBox(height: 8),
           Wrap(spacing: 6, runSpacing: 6, children: [
-            for (final e in consequences) AppChip(tone: ChipTone.warn, child: Text('${e.key} ${e.value > 0 ? '+' : ''}${e.value}')),
+            for (final e in consequences)
+              AppChip(tone: ChipTone.warn, child: Text('${e.key} ${e.value > 0 ? '+' : e.value < 0 ? '−' : ''}${e.value.abs()}${e.key == 'TIME' ? 's' : ''}')),
           ]),
         ],
       ]),
@@ -367,6 +559,8 @@ class _StateChip extends StatelessWidget {
         return const AppChip(tone: ChipTone.warn, child: Text('RESISTING'));
       case 'refused':
         return const AppChip(tone: ChipTone.neg, child: Text('REFUSED'));
+      case 'missed':
+        return const AppChip(tone: ChipTone.neg, child: Text('MISSED'));
       default:
         return const AppChip(child: Text('PENDING'));
     }

@@ -66,6 +66,7 @@ class _RootState extends State<_Root> {
   bool _tutorialBannerShowing = false;
   bool _rivalWarningShowing = false;
   bool _shortfallShowing = false;
+  bool _curveballShowing = false;
 
   @override
   Widget build(BuildContext context) {
@@ -86,6 +87,7 @@ class _RootState extends State<_Root> {
       _maybePromote(context, g);
       _maybeShowAttachmentWarning(context, g);
       _maybeShowRivalWarning(context, g);
+      _maybeShowCurveball(context, g);
       _maybeShowShortfallNotice(context, g);
       _maybeShowTutorialBanner(context, g);
     });
@@ -252,6 +254,68 @@ class _RootState extends State<_Root> {
     ).then((_) => _rivalWarningShowing = false);
   }
 
+  /// The night's one curveball on the Level 3 route — a forced choice with
+  /// each option's price spelled out, so it reads as a decision, not a trap.
+  void _maybeShowCurveball(BuildContext context, CareerController g) {
+    final kind = g.pendingCurveball;
+    if (_curveballShowing || kind == null || _rivalWarningShowing || g.pendingRivalWarning != null) return;
+    _curveballShowing = true;
+    final c = AppColors.of(context);
+    final isPolice = kind == 'police';
+    final targetName = g.curveballTargetId == null ? '' : kCollectionRoute.firstWhere((t) => t.id == g.curveballTargetId).name;
+    final title = isPolice ? 'Police activity' : '${g.rivalCrewName} showed up';
+    final body = isPolice
+        ? 'A patrol car keeps circling the block. Wait it out, or keep working the route with it out there.'
+        : '${g.rivalCrewName} are working $targetName right now — one of your stops.';
+
+    Widget choice(BuildContext ctx, String label, String cost, String value, {bool danger = false}) => Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: AppButton(
+            kind: danger ? BtnKind.danger : BtnKind.ghost,
+            full: true,
+            height: null,
+            onTap: () {
+              g.resolveCurveball(value);
+              Navigator.pop(ctx);
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Column(children: [
+                Text(label, style: AppText.sans(size: 14, weight: FontWeight.w700, color: danger ? c.neg : c.ink)),
+                const SizedBox(height: 2),
+                Text(cost, textAlign: TextAlign.center, style: AppText.sans(size: 11.5, weight: FontWeight.w500, color: c.inkSoft, height: 1.35)),
+              ]),
+            ),
+          ),
+        );
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18), side: BorderSide(color: c.line)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title.toUpperCase(), style: AppText.sans(size: 12, weight: FontWeight.w700, color: c.warn, spacing: 1.2)),
+            const SizedBox(height: 8),
+            Text(body, style: AppText.sans(size: 13.5, weight: FontWeight.w500, color: c.inkSoft, height: 1.5)),
+            const SizedBox(height: 8),
+            if (isPolice) ...[
+              choice(ctx, 'Lay low', '−${CareerController.kLayLowSeconds}s of the night · police heat −${CareerController.kLayLowHeatRelief.round()}', 'lay_low'),
+              choice(ctx, 'Keep collecting', 'No time lost · police heat +${CareerController.kKeepGoingHeat.round()}, suspicion +2', 'keep_going', danger: true),
+            ] else ...[
+              choice(ctx, 'Confront them', '−${CareerController.kConfrontSeconds}s · coin flip: they back off (rival −10), or they dig in and skim $targetName (rival +8, heat +5)', 'confront', danger: true),
+              choice(ctx, 'Let it go', '$targetName pays ${(CareerController.kFactionCutFraction * 100).round()}% less from now on · rival −6', 'let_go'),
+            ],
+          ]),
+        ),
+      ),
+    ).then((_) => _curveballShowing = false);
+  }
+
   void _maybeShowShortfallNotice(BuildContext context, CareerController g) {
     if (_shortfallShowing || g.shortfallNotice == null) return;
     _shortfallShowing = true;
@@ -304,7 +368,7 @@ class _RootState extends State<_Root> {
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text('Promotion', style: AppText.sans(size: 18, weight: FontWeight.w700, color: c.ink)),
             const SizedBox(height: 10),
-            Text(_promotionText(fromLevel), style: AppText.sans(size: 13.5, weight: FontWeight.w500, color: c.inkSoft, height: 1.5)),
+            Text(_promotionText(fromLevel) + _promotionShortWeekNote(fromLevel, g), style: AppText.sans(size: 13.5, weight: FontWeight.w500, color: c.inkSoft, height: 1.5)),
             const SizedBox(height: 18),
             if (fromLevel == 3)
               for (final path in kCareerPaths) ...[
@@ -341,6 +405,15 @@ class _RootState extends State<_Root> {
         ),
       ),
     ).then((_) => _promotionShowing = false);
+  }
+
+  /// Level 3's short weeks follow the player up — said out loud so the
+  /// suspicion they carry into Level 4 isn't a surprise.
+  String _promotionShortWeekNote(int fromLevel, CareerController g) {
+    if (fromLevel != 3 || g.collectorShortWeeks == 0) return '';
+    final weeks = g.collectorShortWeeks;
+    return '\n\nBut you came up short $weeks ${weeks == 1 ? 'week' : 'weeks'} on the way — the new boss has heard. '
+        'You start Level 4 with +${g.promotionCarryOver.round()} suspicion.';
   }
 
   String _promotionText(int fromLevel) {

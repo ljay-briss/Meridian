@@ -200,28 +200,93 @@ const List<Sighting> kSightingPool = [
 
 // ── Level 2: Transporter ────────────────────────────────────────────────
 
-/// One way a checkpoint can play out. The flavor text carries a readable
-/// tell — a concrete detail, not a hint spelled out — that quietly favors
-/// [favoredChoiceIndex] this run. Picking that choice earns a risk discount
-/// on top of whatever the choice already offers; ignore the tell and the
-/// checkpoint still plays exactly as it used to.
-class CheckpointVariant {
+/// Broad flavor of a checkpoint stop — drives the badge shown in the header
+/// and nudges how likely an inspection is (see [CareerController]).
+enum CheckpointKind { routine, heightened, unusual, trap }
+
+String checkpointKindLabel(CheckpointKind k) => switch (k) {
+      CheckpointKind.routine => 'ROUTINE',
+      CheckpointKind.heightened => 'HEIGHTENED',
+      CheckpointKind.unusual => 'UNUSUAL',
+      CheckpointKind.trap => 'MARKED',
+    };
+
+/// One way a checkpoint stop can look this run. [observeReveal] is the
+/// concrete tell — never a spelled-out hint — that OBSERVE surfaces; reading
+/// it right quietly favors [favoredApproachIndex] (a risk discount) and, if
+/// an inspection follows, [favoredResponseIndex] (a suspicion discount).
+/// Skip OBSERVE and the stop still plays exactly the same underneath.
+///
+/// [memoryHook] is a stable id for this exact situation — when the same hook
+/// comes up again at the same checkpoint next run, [memoryRepeatLine] (if
+/// set) replaces the ordinary scene text so returning players notice the
+/// echo instead of reading the same "new" description twice.
+class CheckpointScenario {
+  final CheckpointKind kind;
+  final String title;
+  final String patrol; // LOW | MEDIUM | HIGH — display only
+  final String traffic;
+  final String inspectionLevel;
   final String scene;
-  final int favoredChoiceIndex;
-  const CheckpointVariant(this.scene, this.favoredChoiceIndex);
+  final String observeReveal;
+  final int favoredApproachIndex;
+  final int favoredResponseIndex;
+  final String memoryHook;
+  final String? memoryRepeatLine;
+  const CheckpointScenario({
+    required this.kind,
+    required this.title,
+    required this.patrol,
+    required this.traffic,
+    required this.inspectionLevel,
+    required this.scene,
+    required this.observeReveal,
+    required this.favoredApproachIndex,
+    required this.favoredResponseIndex,
+    required this.memoryHook,
+    this.memoryRepeatLine,
+  });
+}
+
+/// One way to handle a checkpoint once the player commits. [riskDelta] and
+/// [heatDelta] (added to [CareerController.rivalPressure]) apply the moment
+/// the approach is chosen; [skipsInspection] (a route change) trades a flat
+/// cost for never risking the inspection sub-scene at all, while the other
+/// approaches roll [baseInspectionChance] (nudged by the scenario's
+/// [CheckpointKind]) to decide whether one happens.
+class CheckpointApproach {
+  final String label;
+  final int cost;
+  final double riskDelta;
+  final double heatDelta;
+  final bool skipsInspection;
+  final double baseInspectionChance;
+  const CheckpointApproach(
+    this.label,
+    this.riskDelta, {
+    this.cost = 0,
+    this.heatDelta = 0,
+    this.skipsInspection = false,
+    this.baseInspectionChance = 0,
+  });
+}
+
+/// One way to answer the officer's question during an inspection.
+/// [suspicionDelta] is the baseline swing to the 0-5 suspicion meter before
+/// the scenario's favored-response discount and the run's concealment roll
+/// are folded in.
+class InspectionResponse {
+  final String label;
+  final int suspicionDelta;
+  const InspectionResponse(this.label, this.suspicionDelta);
 }
 
 class Checkpoint {
-  final List<CheckpointVariant> variants;
-  final List<CheckpointChoice> choices;
-  const Checkpoint(this.variants, this.choices);
-}
-
-class CheckpointChoice {
-  final String label;
-  final double riskDelta; // added to cumulative caught-chance
-  final int cost;
-  const CheckpointChoice(this.label, this.riskDelta, {this.cost = 0});
+  final List<CheckpointScenario> scenarios;
+  final List<CheckpointApproach> approaches;
+  final String officerQuestion;
+  final List<InspectionResponse> responses;
+  const Checkpoint(this.scenarios, this.approaches, this.officerQuestion, this.responses);
 }
 
 /// How a run just ended — held just long enough for the UI to show a
@@ -232,34 +297,127 @@ class RunOutcome {
   const RunOutcome({required this.caught, required this.cashDelta});
 }
 
+/// Shown by CHECK VEHICLE — flavor for the run's rolled-or-prepped
+/// concealment quality, shared across all 3 checkpoints of a run rather than
+/// re-rolled per stop (it's the same truck all the way to the crossing).
+const String kVehicleRevealGood = 'Your concealment is solid — the load wouldn\'t raise questions even under a real search.';
+const String kVehicleRevealBad = 'The rear compartment\'s a little obvious. A thorough look would catch it.';
+
+/// The 3 checkpoint responses on offer every stop — which one is smart
+/// depends on the scenario's [CheckpointScenario.favoredResponseIndex], not
+/// on the label itself, so this list never needs to change per checkpoint.
+const List<InspectionResponse> kInspectionResponses = [
+  InspectionResponse('Keep it simple', 1),
+  InspectionResponse('Show documents', 1),
+  InspectionResponse('Get defensive', 3),
+];
+
 const List<Checkpoint> kCheckpoints = [
   Checkpoint([
-    CheckpointVariant('A Border Patrol checkpoint sits ahead. The guard on duty is waving trucks through without a second glance.', 0),
-    CheckpointVariant('A Border Patrol checkpoint sits ahead. Just one guard on duty tonight, counting the minutes till his shift ends.', 1),
-    CheckpointVariant('A Border Patrol checkpoint sits ahead — two extra cruisers parked behind the booth that weren\'t there last week.', 2),
+    CheckpointScenario(
+      kind: CheckpointKind.routine,
+      title: 'BORDER PATROL',
+      patrol: 'LOW', traffic: 'MEDIUM', inspectionLevel: 'LOW',
+      scene: 'A Border Patrol checkpoint sits ahead. The guard on duty is waving trucks through without a second glance.',
+      observeReveal: 'He\'s barely looking up from his phone between vehicles.',
+      favoredApproachIndex: 0, favoredResponseIndex: 0,
+      memoryHook: 'bp_routine',
+    ),
+    CheckpointScenario(
+      kind: CheckpointKind.heightened,
+      title: 'BORDER PATROL',
+      patrol: 'HIGH', traffic: 'LOW', inspectionLevel: 'MEDIUM',
+      scene: 'A Border Patrol checkpoint sits ahead — two extra cruisers parked behind the booth that weren\'t there last week.',
+      observeReveal: 'One officer\'s checking cargo compartments more carefully than the others.',
+      favoredApproachIndex: 1, favoredResponseIndex: 1,
+      memoryHook: 'bp_extra_cruisers',
+      memoryRepeatLine: 'The same two cruisers are back again.',
+    ),
+    CheckpointScenario(
+      kind: CheckpointKind.unusual,
+      title: 'BORDER PATROL',
+      patrol: 'MEDIUM', traffic: 'LOW', inspectionLevel: 'MEDIUM',
+      scene: 'A Border Patrol checkpoint sits ahead. The regular crew\'s gone — different faces, different rhythm today.',
+      observeReveal: 'Whoever\'s running this shift doesn\'t know the usual routine yet.',
+      favoredApproachIndex: 2, favoredResponseIndex: 0,
+      memoryHook: 'bp_shift_change',
+      memoryRepeatLine: 'The patrol shift has changed again.',
+    ),
   ], [
-    CheckpointChoice('Drive through calm', 0.14),
-    CheckpointChoice('Slip the guard', 0.04, cost: 300),
-    CheckpointChoice('Cut through the backroad', 0.08),
-  ]),
+    CheckpointApproach('Drive through calm', 0.10, baseInspectionChance: 0.40),
+    CheckpointApproach('Slip the guard', 0.03, cost: 300, heatDelta: 1.5, baseInspectionChance: 0.15),
+    CheckpointApproach('Cut through the backroad', 0.07, cost: 50, skipsInspection: true),
+  ], 'What\'s in the back?', kInspectionResponses),
   Checkpoint([
-    CheckpointVariant('A K9 unit is walking the line — the dog looks bored, barely sniffing as it passes.', 0),
-    CheckpointVariant('A K9 unit is walking the line. The handler\'s alone, making small talk with drivers instead of watching the dog.', 1),
-    CheckpointVariant('A K9 unit is walking the line — the dog\'s ears are up, straining at the leash toward the trucks.', 2),
+    CheckpointScenario(
+      kind: CheckpointKind.routine,
+      title: 'K9 UNIT',
+      patrol: 'LOW', traffic: 'MEDIUM', inspectionLevel: 'LOW',
+      scene: 'A K9 unit is walking the line — the dog looks bored, barely sniffing as it passes.',
+      observeReveal: 'The handler\'s checking his watch more than the dog.',
+      favoredApproachIndex: 0, favoredResponseIndex: 0,
+      memoryHook: 'k9_bored',
+    ),
+    CheckpointScenario(
+      kind: CheckpointKind.heightened,
+      title: 'K9 UNIT',
+      patrol: 'HIGH', traffic: 'LOW', inspectionLevel: 'HIGH',
+      scene: 'A K9 unit is walking the line. The dog\'s ears are up, straining at the leash toward the trucks.',
+      observeReveal: 'It\'s already keyed in on something two trucks up.',
+      favoredApproachIndex: 1, favoredResponseIndex: 1,
+      memoryHook: 'k9_alert',
+      memoryRepeatLine: 'That same dog\'s on the line again — and it\'s just as sharp.',
+    ),
+    CheckpointScenario(
+      kind: CheckpointKind.trap,
+      title: 'K9 UNIT',
+      patrol: 'MEDIUM', traffic: 'LOW', inspectionLevel: 'MEDIUM',
+      scene: 'A K9 unit is walking the line. The handler keeps glancing at a car parked just past the checkpoint — not one of theirs.',
+      observeReveal: 'That car\'s been showing up wherever your runs go lately.',
+      favoredApproachIndex: 2, favoredResponseIndex: 0,
+      memoryHook: 'k9_watched',
+      memoryRepeatLine: 'That same car\'s parked past the checkpoint again.',
+    ),
   ], [
-    CheckpointChoice('Stay in lane', 0.18),
-    CheckpointChoice('Pay off the handler', 0.05, cost: 500),
-    CheckpointChoice('Detour, lose an hour', 0.07),
-  ]),
+    CheckpointApproach('Stay in lane', 0.12, baseInspectionChance: 0.45),
+    CheckpointApproach('Pay off the handler', 0.04, cost: 500, heatDelta: 2, baseInspectionChance: 0.15),
+    CheckpointApproach('Detour, lose an hour', 0.06, cost: 75, skipsInspection: true),
+  ], 'Mind if we take a look?', kInspectionResponses),
   Checkpoint([
-    CheckpointVariant('Random secondary inspection zone ahead — they\'re only pulling every fifth vehicle.', 0),
-    CheckpointVariant('Random secondary inspection zone ahead. The inspector\'s leaning on his clipboard, looking like he\'d rather be anywhere else.', 1),
-    CheckpointVariant('Random secondary inspection zone ahead — they\'re pulling every truck apart, taking their time with each one.', 2),
+    CheckpointScenario(
+      kind: CheckpointKind.routine,
+      title: 'SECONDARY ZONE',
+      patrol: 'LOW', traffic: 'HIGH', inspectionLevel: 'LOW',
+      scene: 'Random secondary inspection zone ahead — they\'re only pulling every fifth vehicle.',
+      observeReveal: 'They just waved the last three trucks straight through.',
+      favoredApproachIndex: 0, favoredResponseIndex: 0,
+      memoryHook: 'sec_light',
+    ),
+    CheckpointScenario(
+      kind: CheckpointKind.heightened,
+      title: 'SECONDARY ZONE',
+      patrol: 'HIGH', traffic: 'LOW', inspectionLevel: 'HIGH',
+      scene: 'Random secondary inspection zone ahead — they\'re pulling every truck apart, taking their time with each one.',
+      observeReveal: 'The inspector\'s got a checklist out, going line by line.',
+      favoredApproachIndex: 1, favoredResponseIndex: 1,
+      memoryHook: 'sec_thorough',
+      memoryRepeatLine: 'Same thorough inspector as last run — still going line by line.',
+    ),
+    CheckpointScenario(
+      kind: CheckpointKind.trap,
+      title: 'SECONDARY ZONE',
+      patrol: 'MEDIUM', traffic: 'MEDIUM', inspectionLevel: 'MEDIUM',
+      scene: 'Random secondary inspection zone ahead. One of the "inspectors" doesn\'t move like the others — more like he\'s waiting for someone specific.',
+      observeReveal: 'He\'s not looking at trucks. He\'s looking for yours.',
+      favoredApproachIndex: 2, favoredResponseIndex: 0,
+      memoryHook: 'sec_watched',
+      memoryRepeatLine: 'He\'s still out there, still not looking at the other trucks.',
+    ),
   ], [
-    CheckpointChoice('Roll the dice', 0.20),
-    CheckpointChoice('Bribe the inspector', 0.06, cost: 400),
-    CheckpointChoice('Turn back and wait it out', 0.10),
-  ]),
+    CheckpointApproach('Roll the dice', 0.14, baseInspectionChance: 0.50),
+    CheckpointApproach('Bribe the inspector', 0.05, cost: 400, heatDelta: 1.5, baseInspectionChance: 0.15),
+    CheckpointApproach('Turn back and wait it out', 0.08, cost: 60, skipsInspection: true),
+  ], 'This your regular route?', kInspectionResponses),
 ];
 
 // ── Level 3: Collector ──────────────────────────────────────────────────
