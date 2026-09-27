@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../controller.dart';
+import '../data.dart';
 import '../widgets.dart';
 
 /// Level 4 — Territory tab: incursion response + exposure overview.
@@ -16,6 +17,15 @@ class Level4TerritoryScreen extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
       children: [
         const ScreenHead('Territory'),
+        if (g.doubleTroubleActive) ...[
+          AppCard(
+            child: Text(
+              'Police and ${g.rivalCrewName} both circling — every distributor gets less reliable while both stay up.',
+              style: AppText.sans(size: 13, weight: FontWeight.w600, color: c.neg, height: 1.4),
+            ),
+          ),
+          const SizedBox(height: 14),
+        ],
         if (g.pendingIncursion != null) ...[
           AppCard(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -54,10 +64,22 @@ class Level4TerritoryScreen extends StatelessWidget {
         AppCard(
           child: Column(children: [
             MeterBar(label: 'Police heat', value: g.policeHeat, color: riskColor(c, g.policeHeat)),
+            const SizedBox(height: 4),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text(level4HeatTierLabel(level4HeatTierFor(g.policeHeat)),
+                  style: AppText.sans(size: 11, weight: FontWeight.w600, color: riskColor(c, g.policeHeat), spacing: 0.5)),
+            ),
             const SizedBox(height: 14),
             MeterBar(label: 'Cartel suspicion', value: g.cartelSuspicion, color: riskColor(c, g.cartelSuspicion)),
             const SizedBox(height: 14),
-            MeterBar(label: 'Rival heat', value: g.rivalPressure, color: riskColor(c, g.rivalPressure)),
+            MeterBar(label: 'Rival pressure', value: g.rivalPressure, color: riskColor(c, g.rivalPressure)),
+            const SizedBox(height: 4),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text(level4RivalTierLabel(level4RivalTierFor(g.rivalPressure)),
+                  style: AppText.sans(size: 11, weight: FontWeight.w600, color: riskColor(c, g.rivalPressure), spacing: 0.5)),
+            ),
           ]),
         ),
       ],

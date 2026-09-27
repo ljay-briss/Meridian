@@ -22,7 +22,7 @@ const Map<int, String> kTutorialBody = {
   1: 'Watch the road. A military convoy means text "bird". A rival cartel\'s SUV means text "snake". Anything harmless, leave it alone. You\'ve got 15 seconds once something rolls by — miss it or get it wrong and that\'s a warning. A second one, and there\'s no coming back.',
   2: 'Get the load across the border. At each checkpoint, pick how you handle it — paying costs cash but lowers your odds of getting stopped. Get caught twice and it\'s twenty years.',
   3: 'Work your route. Visit a stop to collect — if they won\'t pay, threaten them. Still nothing, tell your crew to vandalize the place. Tonight is safer than right now, but nothing here is ever fully safe. Report to your boss once every stop is settled — come back short, and that\'s it.',
-  4: 'A hundred kilos land every month. Allocate them across your distributors on Home, then close out the month — sell to whoever pays best for the biggest cut. Check Crew and Territory before you close out — trouble there can block you, and it won\'t wait for a convenient month.',
+  4: 'A hundred kilos land every month. Each distributor wants a different amount at a different price — and a different amount of risk. Handle the month\'s situation, allocate supply on Home, then close out the month. Watch both meters: police heat and rival pressure each make the other worse once they climb, and a bad month for one makes the next month worse too. Check Crew and Territory before you close out — trouble there can block you, and it won\'t wait for a convenient month.',
   5: 'Five cells report to you. Every month they drift without attention, so check in on Org — you can only manage two at a time, so pick who needs it most. Handle whatever crisis comes up before you can advance the month. Let performance crash two months running and the boss replaces you.',
   6: 'You run the plaza now — territory, money, and an inner circle you can\'t fully trust. Watch Org for anyone acting off. Ignore a real threat and it keeps working against you, but kill the wrong man on a hunch and that costs you too. Heat that climbs too high brings an investigation you can\'t out-earn.',
   7: 'You\'re at the top, and there\'s nowhere left to be promoted to. Negotiate with rivals, manage the paranoia in your circle, and keep your heat down — a bounty this size doesn\'t forgive carelessness. This is the last job. You play it until you don\'t.',
@@ -443,16 +443,29 @@ const List<String> kExcuses = [
 
 // ── Level 4: Cell Leader ─────────────────────────────────────────────────
 
+/// How dangerous it is to keep a distributor's business — feeds the police
+/// heat / rival pressure a heavy allocation generates (see
+/// [CareerController.closeMonth]).
+enum DistributorExposure { low, medium, high }
+
+/// A distributor's monthly order + how good a partner they are. Deliberately
+/// plain data (no logic) so the resolution math in [CareerController] stays
+/// generic over the whole list — adding a fourth distributor is just adding
+/// an entry here.
 class Distributor {
   final String id, name;
-  final double pricePerKg;
-  const Distributor(this.id, this.name, this.pricePerKg);
+  final double basePricePerKg;
+  final int baseDemandKg; // how much they want to buy in a normal month
+  final double baseReliability; // 0..1 — odds they pay an order in full
+  final DistributorExposure exposure;
+  final double growth; // 0..1 — how eagerly their demand grows when trust is high
+  const Distributor(this.id, this.name, this.basePricePerKg, this.baseDemandKg, this.baseReliability, this.exposure, this.growth);
 }
 
 const List<Distributor> kDistributors = [
-  Distributor('d1', 'Downtown connect', 6500),
-  Distributor('d2', 'Northside crew', 5800),
-  Distributor('d3', 'Highway distributor', 7200),
+  Distributor('d1', 'Tony', 5200, 25, 0.92, DistributorExposure.low, 0.12),
+  Distributor('d2', 'Marco', 6400, 22, 0.72, DistributorExposure.medium, 0.32),
+  Distributor('d3', 'Rico', 8200, 20, 0.48, DistributorExposure.high, 0.55),
 ];
 
 const List<String> kCrewTroubleEvents = [
@@ -472,6 +485,300 @@ const List<String> kBossPressureLines = [
   'Word from up top: quotas go up, not down. Figure it out.',
   'The boss doesn\'t care about your problems. He cares about the number.',
 ];
+
+/// One option inside a [MonthlySituationTemplate] — a self-contained bundle
+/// of effects so [CareerController.chooseSituationOption] can apply any
+/// option generically without a switch per situation. `{distributor}` and
+/// `{rival}` in [resultLine] are substituted the same way `{name}` is in
+/// [kCrewTroubleEvents].
+class MonthlySituationOption {
+  final String id;
+  final String label;
+  final int cashCost; // >0 = costs cash, <0 = pays out
+  final double policeHeatDelta;
+  final double rivalPressureDelta;
+  final double cartelSuspicionDelta;
+  final double allCrewLoyaltyDelta; // applied to every crew member, 0..1 scale
+  final double focusDistributorTrustDelta; // 0..1 scale, applied to the situation's focus distributor
+  final int focusDistributorDemandDelta; // kg, applied to the focus distributor's demand
+  final String resultLine;
+  const MonthlySituationOption({
+    required this.id,
+    required this.label,
+    this.cashCost = 0,
+    this.policeHeatDelta = 0,
+    this.rivalPressureDelta = 0,
+    this.cartelSuspicionDelta = 0,
+    this.allCrewLoyaltyDelta = 0,
+    this.focusDistributorTrustDelta = 0,
+    this.focusDistributorDemandDelta = 0,
+    required this.resultLine,
+  });
+}
+
+/// A monthly decision point rolled at the start of every Level 4 month (see
+/// [CareerController.currentSituation]). [needsDistributorFocus] means a
+/// distributor is picked at roll time and substituted into
+/// [description]/options via `{distributor}`.
+class MonthlySituationTemplate {
+  final String id;
+  final String title;
+  final String description;
+  final bool needsDistributorFocus;
+  final List<MonthlySituationOption> options;
+  const MonthlySituationTemplate({
+    required this.id,
+    required this.title,
+    required this.description,
+    this.needsDistributorFocus = false,
+    required this.options,
+  });
+}
+
+const List<MonthlySituationTemplate> kMonthlySituations = [
+  MonthlySituationTemplate(
+    id: 'rival_push',
+    title: 'RIVAL PUSH',
+    description: '{rival} has started undercutting your distributors, offering better terms to peel them away.',
+    options: [
+      MonthlySituationOption(
+        id: 'push_out',
+        label: 'Push them out',
+        policeHeatDelta: 8,
+        rivalPressureDelta: -10,
+        resultLine: 'You sent a message. {rival} backed off — for now.',
+      ),
+      MonthlySituationOption(
+        id: 'pay_loyal',
+        label: 'Pay distributors to stay loyal',
+        cashCost: 4000,
+        rivalPressureDelta: -4,
+        resultLine: 'You spent to keep everyone loyal. {rival} didn\'t get an opening.',
+      ),
+      // Last = the default if the month closes before this gets addressed.
+      MonthlySituationOption(
+        id: 'hold',
+        label: 'Hold your price',
+        rivalPressureDelta: 6,
+        resultLine: 'You held your price. {rival} picked up some ground.',
+      ),
+    ],
+  ),
+  MonthlySituationTemplate(
+    id: 'police_presence',
+    title: 'POLICE PRESENCE',
+    description: 'Patrols have increased around several of your corners.',
+    options: [
+      MonthlySituationOption(
+        id: 'lay_low',
+        label: 'Lay low',
+        cashCost: 1500,
+        policeHeatDelta: -8,
+        resultLine: 'You pulled back for a few weeks. Heat cooled off some.',
+      ),
+      MonthlySituationOption(
+        id: 'push_harder',
+        label: 'Push harder',
+        policeHeatDelta: 10,
+        cashCost: -2500,
+        resultLine: 'You leaned into it anyway. Made money, made noise.',
+      ),
+      // Last = the default if the month closes before this gets addressed.
+      MonthlySituationOption(
+        id: 'keep_operating',
+        label: 'Keep operating',
+        policeHeatDelta: 4,
+        resultLine: 'You kept moving product like normal. The patrols noticed.',
+      ),
+    ],
+  ),
+  MonthlySituationTemplate(
+    id: 'crew_dispute',
+    title: 'CREW DISPUTE',
+    description: 'Two of your guys are fighting over territory, and it\'s starting to affect everyone else.',
+    options: [
+      MonthlySituationOption(
+        id: 'mediate',
+        label: 'Mediate',
+        cashCost: 1000,
+        allCrewLoyaltyDelta: 0.02,
+        resultLine: 'You talked it out. The crew respects that you didn\'t play favorites.',
+      ),
+      MonthlySituationOption(
+        id: 'back_one',
+        label: 'Back one side',
+        allCrewLoyaltyDelta: -0.03,
+        rivalPressureDelta: 2,
+        resultLine: 'You picked a side. The other one hasn\'t forgotten it.',
+      ),
+      MonthlySituationOption(
+        id: 'ignore_dispute',
+        label: 'Ignore it',
+        allCrewLoyaltyDelta: -0.05,
+        resultLine: 'You let it go. It didn\'t go away on its own.',
+      ),
+    ],
+  ),
+  MonthlySituationTemplate(
+    id: 'distributor_demand',
+    title: 'DISTRIBUTOR DEMAND',
+    description: '{distributor} wants more supply this month than usual.',
+    needsDistributorFocus: true,
+    options: [
+      MonthlySituationOption(
+        id: 'give_priority',
+        label: 'Give them priority',
+        focusDistributorTrustDelta: 0.08,
+        focusDistributorDemandDelta: 6,
+        rivalPressureDelta: 2,
+        resultLine: '{distributor} got what they asked for. Trust is up — so is what they\'ll expect next month.',
+      ),
+      MonthlySituationOption(
+        id: 'refuse_deal',
+        label: 'Refuse the deal',
+        focusDistributorTrustDelta: -0.1,
+        focusDistributorDemandDelta: -4,
+        resultLine: 'You turned {distributor} down flat. That relationship just got colder.',
+      ),
+      // Last = the default if the month closes before this gets addressed.
+      MonthlySituationOption(
+        id: 'spread_supply',
+        label: 'Spread the supply',
+        focusDistributorTrustDelta: -0.02,
+        resultLine: 'You spread it around instead. {distributor} wasn\'t thrilled, but nobody\'s starved.',
+      ),
+    ],
+  ),
+  MonthlySituationTemplate(
+    id: 'quiet_month',
+    title: 'QUIET MONTH',
+    description: 'Nothing\'s forcing your hand this month — a rare chance to get ahead of the next problem instead of reacting to one.',
+    options: [
+      MonthlySituationOption(
+        id: 'reinforce',
+        label: 'Reinforce the block',
+        cashCost: 2000,
+        policeHeatDelta: -4,
+        rivalPressureDelta: -4,
+        resultLine: 'You used the quiet to shore things up.',
+      ),
+      MonthlySituationOption(
+        id: 'business_as_usual',
+        label: 'Business as usual',
+        resultLine: 'You let the month run itself. Nothing gained, nothing lost.',
+      ),
+    ],
+  ),
+];
+
+/// Police heat thresholds for Level 4 — deliberately more granular than the
+/// shared [riskLabel]/[riskColor] bands other levels use, since heat is a
+/// much bigger driver of Level 4's moment-to-moment decisions.
+enum Level4HeatTier { low, watched, investigation, heavy, crackdown, critical }
+
+Level4HeatTier level4HeatTierFor(double heat) {
+  if (heat < 20) return Level4HeatTier.low;
+  if (heat < 40) return Level4HeatTier.watched;
+  if (heat < 60) return Level4HeatTier.investigation;
+  if (heat < 80) return Level4HeatTier.heavy;
+  if (heat < 95) return Level4HeatTier.crackdown;
+  return Level4HeatTier.critical;
+}
+
+String level4HeatTierLabel(Level4HeatTier t) => switch (t) {
+      Level4HeatTier.low => 'LOW HEAT',
+      Level4HeatTier.watched => 'WATCHED',
+      Level4HeatTier.investigation => 'ACTIVE INVESTIGATION',
+      Level4HeatTier.heavy => 'HEAVY PRESSURE',
+      Level4HeatTier.crackdown => 'CRACKDOWN',
+      Level4HeatTier.critical => 'CRITICAL',
+    };
+
+/// Rival pressure thresholds for Level 4 — same idea as [Level4HeatTier].
+enum Level4RivalTier { quiet, watching, encroaching, active, war, critical }
+
+Level4RivalTier level4RivalTierFor(double rival) {
+  if (rival < 20) return Level4RivalTier.quiet;
+  if (rival < 40) return Level4RivalTier.watching;
+  if (rival < 60) return Level4RivalTier.encroaching;
+  if (rival < 80) return Level4RivalTier.active;
+  if (rival < 95) return Level4RivalTier.war;
+  return Level4RivalTier.critical;
+}
+
+String level4RivalTierLabel(Level4RivalTier t) => switch (t) {
+      Level4RivalTier.quiet => 'QUIET',
+      Level4RivalTier.watching => 'WATCHING',
+      Level4RivalTier.encroaching => 'ENCROACHING',
+      Level4RivalTier.active => 'ACTIVE RIVALRY',
+      Level4RivalTier.war => 'TERRITORY WAR',
+      Level4RivalTier.critical => 'CRITICAL',
+    };
+
+/// One labeled, signed change shown on the month-resolution card — the
+/// implementation of "never silently change heat" (every police-heat or
+/// rival-pressure delta the month produced gets one of these).
+class HeatReason {
+  final String label;
+  final double amount;
+  const HeatReason(this.label, this.amount);
+}
+
+/// One distributor's outcome for the month, shown in the resolution card.
+class DeliveryLine {
+  final String distributorName;
+  final int wantedKg;
+  final int paidKg;
+  final int revenue;
+  final String detail; // "paid in full" / "was short by N KG" / "refused part of the order" / ...
+  const DeliveryLine({
+    required this.distributorName,
+    required this.wantedKg,
+    required this.paidKg,
+    required this.revenue,
+    required this.detail,
+  });
+}
+
+/// The full "month complete" payoff card — built once by [CareerController.
+/// closeMonth] and shown by the Home screen instead of jumping straight to
+/// the next month.
+class MonthResolution {
+  final int monthNumber;
+  final int take;
+  final List<DeliveryLine> deliveries;
+  final List<HeatReason> policeHeatReasons;
+  final List<HeatReason> rivalPressureReasons;
+  final List<String> crewLines;
+  final List<String> territoryLines;
+  final String? situationSummary;
+  const MonthResolution({
+    required this.monthNumber,
+    required this.take,
+    required this.deliveries,
+    required this.policeHeatReasons,
+    required this.rivalPressureReasons,
+    required this.crewLines,
+    required this.territoryLines,
+    this.situationSummary,
+  });
+}
+
+/// Live, non-committal preview of what closing the month right now would do
+/// — recomputed on every build from the current allocation so the Home
+/// screen can show it updating as the player adjusts supply.
+class MonthProjection {
+  final int projectedTake;
+  final double projectedPoliceHeatDelta;
+  final double projectedRivalPressureDelta;
+  final String riskLabel; // LOW / MEDIUM / HIGH
+  const MonthProjection({
+    required this.projectedTake,
+    required this.projectedPoliceHeatDelta,
+    required this.projectedRivalPressureDelta,
+    required this.riskLabel,
+  });
+}
 
 // ── Level 5-7: strategic layer ───────────────────────────────────────────
 
