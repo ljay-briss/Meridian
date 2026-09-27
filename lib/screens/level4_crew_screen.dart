@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../theme.dart';
 import '../controller.dart';
 import '../data.dart';
@@ -28,9 +29,29 @@ class Level4CrewScreen extends StatelessWidget {
               ),
               const SizedBox(height: 16),
               Row(children: [
-                Expanded(child: AppButton(kind: BtnKind.ghost, full: true, onTap: () => g.discipline(g.pendingTrouble!, 'beating'), child: const Text('Beat him'))),
+                Expanded(
+                  child: AppButton(
+                    kind: BtnKind.ghost,
+                    full: true,
+                    onTap: () {
+                      HapticFeedback.mediumImpact();
+                      g.discipline(g.pendingTrouble!, 'beating');
+                    },
+                    child: const Text('Beat him'),
+                  ),
+                ),
                 const SizedBox(width: 8),
-                Expanded(child: AppButton(kind: BtnKind.danger, full: true, onTap: () => g.discipline(g.pendingTrouble!, 'kill'), child: const Text('Kill him'))),
+                Expanded(
+                  child: AppButton(
+                    kind: BtnKind.danger,
+                    full: true,
+                    onTap: () {
+                      HapticFeedback.heavyImpact();
+                      g.discipline(g.pendingTrouble!, 'kill');
+                    },
+                    child: const Text('Kill him'),
+                  ),
+                ),
               ]),
             ]),
           ),

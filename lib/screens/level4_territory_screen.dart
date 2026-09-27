@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../theme.dart';
 import '../controller.dart';
 import '../data.dart';
@@ -38,7 +39,10 @@ class Level4TerritoryScreen extends StatelessWidget {
                   child: AppButton(
                     kind: BtnKind.danger,
                     full: true,
-                    onTap: () => g.respondIncursion('violence'),
+                    onTap: () {
+                      HapticFeedback.heavyImpact();
+                      g.respondIncursion('violence');
+                    },
                     child: const Text('Send guys with guns'),
                   ),
                 ),
@@ -47,7 +51,10 @@ class Level4TerritoryScreen extends StatelessWidget {
                   child: AppButton(
                     kind: BtnKind.ghost,
                     full: true,
-                    onTap: () => g.respondIncursion('negotiate'),
+                    onTap: () {
+                      HapticFeedback.mediumImpact();
+                      g.respondIncursion('negotiate');
+                    },
                     child: const Text('Pay them off'),
                   ),
                 ),

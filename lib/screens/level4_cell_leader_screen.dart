@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../theme.dart';
 import '../controller.dart';
 import '../data.dart';
@@ -55,7 +56,7 @@ class CellLeaderScreen extends StatelessWidget {
         const SizedBox(height: 18),
         Text('BALANCE', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink, spacing: 1.2)),
         const SizedBox(height: 6),
-        Text(money(g.cash), style: AppText.mono(size: 44, weight: FontWeight.w600, color: cashColor(c, g.cash))),
+        AnimatedMoney(value: g.cash, styleFor: (v) => AppText.mono(size: 44, weight: FontWeight.w600, color: cashColor(c, v))),
         const SizedBox(height: 6),
         Text('month ${g.monthsAsLeader + 1} · last take ${money(g.lastMonthTake)}', style: AppText.sans(size: 11, weight: FontWeight.w500, color: c.ink)),
         Container(height: 1, color: c.lineSoft, margin: const EdgeInsets.symmetric(vertical: 22)),
@@ -101,8 +102,19 @@ class CellLeaderScreen extends StatelessWidget {
   }
 
   Future<void> _closeMonth(BuildContext context, CareerController g) async {
+    HapticFeedback.mediumImpact();
+    SystemSound.play(SystemSoundType.click);
     final resolution = g.closeMonth();
     if (resolution == null || g.gameOver || !context.mounted) return;
+    final tierWorsened = (resolution.heatTierChangeNote?.startsWith('Crossed') ?? false) ||
+        (resolution.rivalTierChangeNote?.startsWith('Crossed') ?? false);
+    if (resolution.wasShortMonth || tierWorsened) {
+      HapticFeedback.heavyImpact();
+    } else if (resolution.isBestMonth) {
+      HapticFeedback.mediumImpact();
+    } else {
+      HapticFeedback.lightImpact();
+    }
     await showAppSheet(context, 'MONTH ${resolution.monthNumber} COMPLETE', (ctx) => _MonthResolutionBody(resolution: resolution));
   }
 }
@@ -162,7 +174,12 @@ class _SituationCard extends StatelessWidget {
     return AppButton(
       kind: BtnKind.ghost,
       full: true,
-      onTap: affordable ? () => g.chooseSituationOption(option.id) : null,
+      onTap: affordable
+          ? () {
+              HapticFeedback.selectionClick();
+              g.chooseSituationOption(option.id);
+            }
+          : null,
       child: Text('${option.label}$costLabel'),
     );
   }
@@ -263,6 +280,26 @@ class _DistributorCard extends StatelessWidget {
   }
 }
 
+/// A cash figure that always animates up from zero on its first frame —
+/// unlike [AnimatedMoney] (which is for a value that changes reactively
+/// under an already-mounted widget), this is for a fresh reveal: the
+/// resolution sheet mounts once per month close, so it always starts the
+/// count from nothing.
+class _RevealMoney extends StatelessWidget {
+  final int value;
+  final TextStyle style;
+  const _RevealMoney({required this.value, required this.style});
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: value.toDouble()),
+      duration: const Duration(milliseconds: 900),
+      curve: Curves.easeOutCubic,
+      builder: (context, v, _) => Text(signedMoney(v.round()), style: style),
+    );
+  }
+}
+
 /// Body of the "month complete" sheet — the payoff [showAppSheet] shows
 /// after [CareerController.closeMonth] instead of jumping straight to next month.
 class _MonthResolutionBody extends StatelessWidget {
@@ -272,8 +309,27 @@ class _MonthResolutionBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
+    final badges = <Widget>[
+      if (resolution.isBestMonth)
+        AppChip(tone: ChipTone.pos, child: const Text('NEW BEST MONTH'))
+      else if (resolution.wasShortMonth)
+        AppChip(tone: ChipTone.warn, child: const Text('SHORT MONTH')),
+      if (resolution.monthStreak >= 2) AppChip(tone: ChipTone.neutral, child: Text('${resolution.monthStreak} MONTHS RUNNING')),
+    ];
     return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(signedMoney(resolution.take), style: AppText.mono(size: 32, weight: FontWeight.w700, color: cashColor(c, resolution.take))),
+      _RevealMoney(value: resolution.take, style: AppText.mono(size: 32, weight: FontWeight.w700, color: cashColor(c, resolution.take))),
+      if (badges.isNotEmpty) ...[
+        const SizedBox(height: 10),
+        Wrap(spacing: 8, runSpacing: 8, children: badges),
+      ],
+      if (resolution.heatTierChangeNote != null) ...[
+        const SizedBox(height: 10),
+        _tierChangeLine(c, 'POLICE', resolution.heatTierChangeNote!),
+      ],
+      if (resolution.rivalTierChangeNote != null) ...[
+        const SizedBox(height: 6),
+        _tierChangeLine(c, 'TERRITORY', resolution.rivalTierChangeNote!),
+      ],
       const SizedBox(height: 18),
       if (resolution.situationSummary != null) ...[
         const TLabel('This month'),
@@ -286,9 +342,15 @@ class _MonthResolutionBody extends StatelessWidget {
         const SizedBox(height: 6),
         for (final d in resolution.deliveries)
           Padding(
-            padding: const EdgeInsets.only(bottom: 4),
-            child: Text('${d.distributorName} ${d.detail} — ${money(d.revenue)}',
-                style: AppText.sans(size: 13, weight: FontWeight.w500, color: c.ink, height: 1.4)),
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Icon(_deliveryIcon(d.outcome), size: 16, color: _deliveryColor(c, d.outcome)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('${d.distributorName} ${d.detail} — ${money(d.revenue)}',
+                    style: AppText.sans(size: 13, weight: FontWeight.w500, color: c.ink, height: 1.4)),
+              ),
+            ]),
           ),
         const SizedBox(height: 16),
       ],
@@ -327,4 +389,21 @@ class _MonthResolutionBody extends StatelessWidget {
       AppButton(full: true, height: 48, onTap: () => Navigator.pop(context), child: const Text('Next month')),
     ]);
   }
+
+  Widget _tierChangeLine(AppColors c, String label, String note) {
+    final worse = note.startsWith('Crossed');
+    return Text('$label: $note', style: AppText.sans(size: 12.5, weight: FontWeight.w700, color: worse ? c.neg : c.pos, height: 1.3));
+  }
+
+  IconData _deliveryIcon(DeliveryOutcome outcome) => switch (outcome) {
+        DeliveryOutcome.full => Icons.check_circle_outline,
+        DeliveryOutcome.short => Icons.error_outline,
+        DeliveryOutcome.refused => Icons.cancel_outlined,
+      };
+
+  Color _deliveryColor(AppColors c, DeliveryOutcome outcome) => switch (outcome) {
+        DeliveryOutcome.full => c.pos,
+        DeliveryOutcome.short => c.warn,
+        DeliveryOutcome.refused => c.neg,
+      };
 }

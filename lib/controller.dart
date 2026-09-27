@@ -347,6 +347,8 @@ class CareerController extends ChangeNotifier {
   String? currentSituationChoiceId;
   String? _lastSituationId; // avoids immediately repeating the same template
   MonthResolution? lastResolution; // most recent month's payoff card — see closeMonth()
+  int bestMonthTake = 0; // for the "new best month" callout — see closeMonth()
+  int goodMonthStreak = 0; // consecutive non-short months, including the current one
 
   // ── Level 5: cell-leader management loop ──
   List<CellLeaderRecord> cellLeaders = [];
@@ -1527,6 +1529,8 @@ class CareerController extends ChangeNotifier {
     distributorLowTrustStreak.clear();
     distributorLostToRival.clear();
     lastResolution = null;
+    bestMonthTake = 0;
+    goodMonthStreak = 0;
     _lastSituationId = null;
     _rollMonthlySituation();
   }
@@ -1750,17 +1754,22 @@ class CareerController extends ChangeNotifier {
     final roll = _rng.nextDouble();
     int paidKg;
     String detail;
+    DeliveryOutcome outcome;
     if (roll < rel) {
       paidKg = kg;
       detail = 'paid in full';
+      outcome = DeliveryOutcome.full;
     } else if (roll < rel + (1 - rel) * 0.65) {
       final frac = 0.4 + _rng.nextDouble() * 0.45;
       paidKg = (kg * frac).round().clamp(0, kg);
-      detail = kg - paidKg > 0 ? 'was short by ${kg - paidKg} KG' : 'paid in full';
+      final short = kg - paidKg > 0;
+      detail = short ? 'was short by ${kg - paidKg} KG' : 'paid in full';
+      outcome = short ? DeliveryOutcome.short : DeliveryOutcome.full;
     } else {
       final frac = _rng.nextDouble() * 0.3;
       paidKg = (kg * frac).round().clamp(0, kg);
       detail = paidKg == 0 ? 'refused the order entirely' : 'refused part of the order';
+      outcome = DeliveryOutcome.refused;
     }
 
     final excess = max(0, kg - wanted);
@@ -1824,12 +1833,27 @@ class CareerController extends ChangeNotifier {
       }
     }
 
-    return DeliveryLine(distributorName: d.name, wantedKg: wanted, paidKg: paidKg, revenue: revenue, detail: detail);
+    return DeliveryLine(distributorName: d.name, wantedKg: wanted, paidKg: paidKg, revenue: revenue, outcome: outcome, detail: detail);
+  }
+
+  /// null when the tier didn't move; otherwise names the direction so the
+  /// resolution card can flag it instead of leaving a tier change to be
+  /// noticed only by comparing two numbers on a meter.
+  String? _tierChangeNote(int beforeIndex, int afterIndex, String afterLabel) {
+    if (beforeIndex == afterIndex) return null;
+    return afterIndex > beforeIndex ? 'Crossed into $afterLabel' : 'Back down to $afterLabel';
   }
 
   MonthResolution? closeMonth() {
     if (level != 4 || level4Busy) return null;
     if (pendingIncursion != null || pendingTrouble != null) return null;
+
+    // Snapshot where both meters stood before this month's effects land, so
+    // the resolution card can call out crossing a tier either way — the
+    // concrete version of "visually emphasize the state" the meters alone
+    // can't give a one-off, one-month callout for.
+    final heatTierBefore = level4HeatTierFor(policeHeat);
+    final rivalTierBefore = level4RivalTierFor(rivalPressure);
 
     // The month's situation doesn't block closing — ignoring it is a valid
     // (if worse) choice. Anything left unpicked auto-resolves to the
@@ -1875,6 +1899,11 @@ class CareerController extends ChangeNotifier {
     }
 
     final take = (revenue * 0.10 * _pathIncomeMultiplier).round();
+    // Best-month/streak are read for the resolution card's callouts below —
+    // computed against the take *before* it updates bestMonthTake itself.
+    final isBestMonth = monthsAsLeader > 0 && take > bestMonthTake;
+    bestMonthTake = max(bestMonthTake, take);
+    goodMonthStreak = take >= kLevel4ShortMonthThreshold ? goodMonthStreak + 1 : 0;
     cash += take;
     lastMonthTake = take;
     monthsAsLeader += 1;
@@ -1930,6 +1959,8 @@ class CareerController extends ChangeNotifier {
       promotionAvailable = true;
     }
 
+    final heatTierAfter = level4HeatTierFor(policeHeat);
+    final rivalTierAfter = level4RivalTierFor(rivalPressure);
     final resolution = MonthResolution(
       monthNumber: monthsAsLeader,
       take: take,
@@ -1937,8 +1968,13 @@ class CareerController extends ChangeNotifier {
       policeHeatReasons: heatReasons,
       rivalPressureReasons: rivalReasons,
       crewLines: crewLines,
-      territoryLines: ['$rivalCrewName — pressure now ${rivalPressure.round()} (${level4RivalTierLabel(level4RivalTierFor(rivalPressure))})'],
+      territoryLines: ['$rivalCrewName — pressure now ${rivalPressure.round()} (${level4RivalTierLabel(rivalTierAfter)})'],
       situationSummary: situationSummary,
+      isBestMonth: isBestMonth,
+      monthStreak: goodMonthStreak,
+      wasShortMonth: take < kLevel4ShortMonthThreshold,
+      heatTierChangeNote: _tierChangeNote(heatTierBefore.index, heatTierAfter.index, level4HeatTierLabel(heatTierAfter)),
+      rivalTierChangeNote: _tierChangeNote(rivalTierBefore.index, rivalTierAfter.index, level4RivalTierLabel(rivalTierAfter)),
     );
     lastResolution = resolution;
     _rollMonthlySituation();

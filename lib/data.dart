@@ -724,25 +724,33 @@ class HeatReason {
   const HeatReason(this.label, this.amount);
 }
 
+/// Coarse shape of a delivery, for the resolution card to color/mark without
+/// parsing [DeliveryLine.detail] text.
+enum DeliveryOutcome { full, short, refused }
+
 /// One distributor's outcome for the month, shown in the resolution card.
 class DeliveryLine {
   final String distributorName;
   final int wantedKg;
   final int paidKg;
   final int revenue;
+  final DeliveryOutcome outcome;
   final String detail; // "paid in full" / "was short by N KG" / "refused part of the order" / ...
   const DeliveryLine({
     required this.distributorName,
     required this.wantedKg,
     required this.paidKg,
     required this.revenue,
+    required this.outcome,
     required this.detail,
   });
 }
 
 /// The full "month complete" payoff card — built once by [CareerController.
 /// closeMonth] and shown by the Home screen instead of jumping straight to
-/// the next month.
+/// the next month. [isBestMonth]/[monthStreak]/the tier-change notes exist
+/// purely to give the player something to feel good (or bad) about right
+/// away, on top of the raw numbers.
 class MonthResolution {
   final int monthNumber;
   final int take;
@@ -752,6 +760,11 @@ class MonthResolution {
   final List<String> crewLines;
   final List<String> territoryLines;
   final String? situationSummary;
+  final bool isBestMonth;
+  final int monthStreak; // consecutive months (including this one) that weren't short
+  final bool wasShortMonth;
+  final String? heatTierChangeNote; // e.g. "Crossed into ACTIVE INVESTIGATION"
+  final String? rivalTierChangeNote;
   const MonthResolution({
     required this.monthNumber,
     required this.take,
@@ -761,6 +774,11 @@ class MonthResolution {
     required this.crewLines,
     required this.territoryLines,
     this.situationSummary,
+    this.isBestMonth = false,
+    this.monthStreak = 0,
+    this.wasShortMonth = false,
+    this.heatTierChangeNote,
+    this.rivalTierChangeNote,
   });
 }
 
