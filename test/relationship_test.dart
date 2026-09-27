@@ -6,13 +6,17 @@ import 'package:meridian_private/conversation/reply_tray.dart';
 import 'package:meridian_private/data.dart';
 
 /// Advances the relationship engine by one beat using Level 4's monthly
-/// cycle as a neutral driver (it has no strike/death risk when supply is
-/// fully allocated to a single high-value distributor and heat starts at 0).
+/// cycle as a neutral driver. Allocates to the safest distributor and
+/// neutralizes every other Level 4 side effect (crises, the monthly
+/// situation, short-month strikes) so this stays a pure time-advance with
+/// no strike/death risk of its own.
 void _tick(CareerController g) {
-  g.allocate('d1', 100);
+  g.allocate('tony', 100); // lowest-exposure distributor — keeps this driver's own heat generation negligible
   g.closeMonth();
   g.pendingIncursion = null;
   g.pendingTrouble = null;
+  g.pendingSituation = null; // this driver doesn't exercise Level 4's monthly decision point
+  g.shortMonths = 0; // delivery is reliability-rolled now — never let bad luck kill this neutral driver
   g.level4Busy = false; // this helper drives ticks instantly, not in real time
 }
 

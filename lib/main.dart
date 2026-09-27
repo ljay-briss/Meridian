@@ -67,6 +67,7 @@ class _RootState extends State<_Root> {
   bool _rivalWarningShowing = false;
   bool _shortfallShowing = false;
   bool _curveballShowing = false;
+  bool _monthResolutionShowing = false;
 
   @override
   Widget build(BuildContext context) {
@@ -89,6 +90,7 @@ class _RootState extends State<_Root> {
       _maybeShowRivalWarning(context, g);
       _maybeShowCurveball(context, g);
       _maybeShowShortfallNotice(context, g);
+      _maybeShowMonthResolution(context, g);
       _maybeShowTutorialBanner(context, g);
     });
 
@@ -351,6 +353,61 @@ class _RootState extends State<_Root> {
     ).then((_) => _shortfallShowing = false);
   }
 
+  /// Level 4's month-close payoff — deliveries, crew notes, and every
+  /// labeled heat/rival swing, so closing a month reads as an event instead
+  /// of the balance just silently updating.
+  void _maybeShowMonthResolution(BuildContext context, CareerController g) {
+    if (_monthResolutionShowing || g.pendingMonthResolution == null) return;
+    _monthResolutionShowing = true;
+    final c = AppColors.of(context);
+    final r = g.pendingMonthResolution!;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18), side: BorderSide(color: c.line)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 40),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.78),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('MONTH ${r.monthNumber} COMPLETE', style: AppText.sans(size: 13, weight: FontWeight.w600, color: c.inkFaint, spacing: 1.0)),
+              const SizedBox(height: 4),
+              Text(signedMoney(r.take), style: AppText.mono(size: 32, weight: FontWeight.w700, color: r.take >= 0 ? c.pos : c.neg)),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const SizedBox(height: 16),
+                    _ResolutionSection(title: 'DELIVERIES', lines: [for (final d in r.deliveries) '${d.distributorName} — ${d.note}${d.paid > 0 ? ' (${money(d.paid)})' : ''}']),
+                    if (r.crewNotes.isNotEmpty) _ResolutionSection(title: 'CREW', lines: r.crewNotes),
+                    if (r.notes.isNotEmpty) _ResolutionSection(title: 'NOTES', lines: r.notes),
+                    _ResolutionSection(
+                      title: 'EXPOSURE',
+                      lines: [for (final d in r.meterDeltas) '${d.label} ${signedMoney(d.value).replaceFirst('\$', '')} — ${d.reason}'],
+                    ),
+                  ]),
+                ),
+              ),
+              const SizedBox(height: 16),
+              AppButton(
+                kind: BtnKind.dark,
+                full: true,
+                height: 48,
+                onTap: () {
+                  g.acknowledgeMonthResolution();
+                  Navigator.pop(ctx);
+                },
+                child: const Text('Next month'),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    ).then((_) => _monthResolutionShowing = false);
+  }
+
   void _maybePromote(BuildContext context, CareerController g) {
     if (_promotionShowing || !g.promotionAvailable) return;
     _promotionShowing = true;
@@ -469,6 +526,32 @@ class _TabDef {
   final Widget screen;
   final Widget Function(Color color) glyph;
   _TabDef(this.label, this.screen, this.glyph);
+}
+
+/// One labeled group of lines on the month-resolution card (DELIVERIES,
+/// CREW, EXPOSURE, …) — renders nothing for an empty section.
+class _ResolutionSection extends StatelessWidget {
+  final String title;
+  final List<String> lines;
+  const _ResolutionSection({required this.title, required this.lines});
+
+  @override
+  Widget build(BuildContext context) {
+    if (lines.isEmpty) return const SizedBox.shrink();
+    final c = AppColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(title, style: AppText.sans(size: 10.5, weight: FontWeight.w600, color: c.inkFaint, spacing: 1.0)),
+        const SizedBox(height: 6),
+        for (final line in lines)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(line, style: AppText.sans(size: 13, weight: FontWeight.w500, color: c.inkSoft, height: 1.4)),
+          ),
+      ]),
+    );
+  }
 }
 
 class _TabBar extends StatelessWidget {

@@ -16,7 +16,16 @@ class Level4CrewScreen extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
       children: [
-        const ScreenHead('Crew', sub: '10 men on the payroll'),
+        ScreenHead('Crew', sub: '${g.crewNames.length} men on the payroll'),
+        if (g.pendingTrouble == null) ...[
+          AppButton(
+            kind: BtnKind.ghost,
+            full: true,
+            onTap: g.cash >= 1000 ? g.reassureCrew : null,
+            child: const Text('Take the crew out — \$1,000'),
+          ),
+          const SizedBox(height: 14),
+        ],
         if (g.pendingTrouble != null) ...[
           AppCard(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

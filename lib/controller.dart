@@ -29,6 +29,18 @@ String _pickVariant(Random rng, List<String> pool, String? avoid) {
   return pick;
 }
 
+/// Live, per-run state for one Level 4 [Distributor] — everything that
+/// moves month to month and isn't in the static data table. [trust] drives
+/// both reliability and how [orderKg] drifts; [chainStage] is what lets a
+/// month-3 decision still bite in month 5 (see CareerController.closeMonth).
+class DistributorRuntime {
+  double trust; // 0..1
+  int orderKg; // this month's desired order — drifts from Distributor.baseOrderKg
+  int neglectStreak; // consecutive months under-supplied past the deadband
+  int chainStage; // 0 normal, 1 patience running out, 2 defected to a rival
+  DistributorRuntime({this.trust = 0.7, required this.orderKg, this.neglectStreak = 0, this.chainStage = 0});
+}
+
 /// Holds all game state and logic across every career level.
 class CareerController extends ChangeNotifier {
   final Random _rng;
@@ -317,6 +329,7 @@ class CareerController extends ChangeNotifier {
   // ── Level 4: Cell Leader ──
   static const int level4GapSeconds = 5; // settling time after closing a month or a crisis
   int stashKg = 100;
+  int _stashKgBase = 100; // reset target each month, before a situation's stashMultiplier shrinks it
   final Map<String, int> allocated = {};
   List<String> crewNames = [];
   final Map<String, double> crewLoyalty = {};
@@ -327,6 +340,27 @@ class CareerController extends ChangeNotifier {
   String? pendingTrouble; // crew member name with trouble
   bool level4Busy = false;
   Timer? _level4GapTimer;
+
+  // Live trust/order/chain state per distributor — the static [Distributor]
+  // table in data.dart never changes at runtime, this does. Keyed by
+  // Distributor.id.
+  final Map<String, DistributorRuntime> distributorState = {};
+  MonthlySituation? pendingSituation;
+  String? pendingSituationDistributorId; // only set when pendingSituation.needsDistributor
+  String? _lastSituationId; // avoid immediately repeating the same situation
+  MonthlySituation? _forcedNextSituation; // a chain-reaction situation queued by a neglected distributor
+  String? _forcedNextSituationDistributorId;
+  MonthResolution? pendingMonthResolution;
+
+  /// Fills `{rival}` / `{distributor}` placeholders in Level 4 situation text.
+  String fillSituationText(String text) {
+    var out = text.replaceAll('{rival}', rivalCrewName);
+    if (pendingSituationDistributorId != null) {
+      final name = kDistributors.firstWhere((d) => d.id == pendingSituationDistributorId).name;
+      out = out.replaceAll('{distributor}', name);
+    }
+    return out;
+  }
 
   // ── Level 5: cell-leader management loop ──
   List<CellLeaderRecord> cellLeaders = [];
@@ -435,11 +469,15 @@ class CareerController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// What [payOffRival] would currently cost — read by the UI so a "pay off
+  /// rivals" button can disable itself accurately instead of guessing.
+  int get rivalPayoffCost => max(1000, (cash * 0.08).round());
+
   /// Proactive defuse: pay a slice of cash on hand to bring rival pressure
   /// down before it ever reaches a forced warning.
   void payOffRival() {
     if (rivalPressure <= 0) return;
-    final cost = max(1000, (cash * 0.08).round());
+    final cost = rivalPayoffCost;
     if (cash < cost) return;
     cash -= cost;
     rivalPressure = _clamp01to100(rivalPressure - 25);
@@ -486,9 +524,13 @@ class CareerController extends ChangeNotifier {
     pendingSideHustleGame = null;
     if (won) {
       cash += kSideHustlePayout[level] ?? 0;
+      // As a cell leader, a clean run occasionally buys a little cover too.
+      if (level == 4 && _rng.nextDouble() < 0.25) policeHeat = _clamp01to100(policeHeat - 3);
     } else {
       cash -= kSideHustleLossPayout[level] ?? 0;
       policeHeat = _clamp01to100(policeHeat + 6);
+      // A botched hustle can draw the wrong kind of attention, not just police.
+      if (level == 4 && _rng.nextDouble() < 0.3) rivalPressure = _clamp01to100(rivalPressure + 4);
     }
     notifyListeners();
   }
@@ -1485,7 +1527,8 @@ class CareerController extends ChangeNotifier {
     _strategicGapTimer?.cancel();
     _dayTimer?.cancel();
     level = 4;
-    stashKg = 100;
+    _stashKgBase = 100;
+    stashKg = _stashKgBase;
     allocated.clear();
     crewNames = List.generate(10, (i) => '${kCrewNamesPool[i % kCrewNamesPool.length]}${i >= kCrewNamesPool.length ? ' ${i ~/ kCrewNamesPool.length + 1}' : ''}');
     crewLoyalty
@@ -1497,6 +1540,19 @@ class CareerController extends ChangeNotifier {
     pendingIncursion = null;
     pendingTrouble = null;
     level4Busy = false;
+    distributorState
+      ..clear()
+      ..addEntries(kDistributors.map((d) => MapEntry(d.id, DistributorRuntime(orderKg: d.baseOrderKg))));
+    pendingSituation = null;
+    pendingSituationDistributorId = null;
+    _lastSituationId = null;
+    _forcedNextSituation = null;
+    _forcedNextSituationDistributorId = null;
+    _forceTroubleNextMonth = false;
+    _pendingEventMeterDeltas.clear();
+    lastSituationOutcome = null;
+    pendingMonthResolution = null;
+    _rollNextSituation();
   }
 
   int get allocatedKg => allocated.values.fold(0, (a, v) => a + v);
@@ -1525,32 +1581,316 @@ class CareerController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// How reliably [d] delivers this month, before the random delivery roll —
+  /// baseline trust/reliability, degraded by how hot police and rivals are
+  /// right now (worse for high-[ExposureLevel.high] distributors) and by
+  /// having already started moving weight for a rival (chainStage 2).
+  double _effectiveReliability(Distributor d, DistributorRuntime st) {
+    double r = d.baseReliability + (st.trust - 0.7) * 0.3;
+    final heatTier = policeHeatTierIndex(policeHeat);
+    final rivalTier = rivalTierIndex(rivalPressure);
+    final exposureMult = switch (d.exposure) {
+      ExposureLevel.low => 0.4,
+      ExposureLevel.medium => 0.8,
+      ExposureLevel.high => 1.3,
+    };
+    r -= heatTier * 0.03 * exposureMult;
+    r -= rivalTier * 0.02 * exposureMult;
+    if (heatTier >= 3 && rivalTier >= 3) r -= 0.08; // both high at once is an extremely dangerous month
+    if (st.chainStage >= 2) r -= 0.15; // already moving weight for a rival — unreliable by nature now
+    return r.clamp(0.1, 0.98);
+  }
+
+  /// Current effective reliability for distributor [id] — read by the Home
+  /// screen's distributor cards. Mirrors the roll [closeMonth] actually uses.
+  double distributorReliability(String id) {
+    final d = kDistributors.firstWhere((x) => x.id == id);
+    final st = distributorState[id];
+    if (st == null) return d.baseReliability;
+    return _effectiveReliability(d, st);
+  }
+
+  /// Expected (noise-free) take across the current allocation — read by the
+  /// Home screen's projected-outcome panel so it updates live as the player
+  /// drags allocations around, before anything actually commits.
+  int get projectedTake {
+    double revenue = 0;
+    for (final d in kDistributors) {
+      final kg = allocated[d.id] ?? 0;
+      if (kg <= 0) continue;
+      final st = distributorState[d.id];
+      if (st == null) continue;
+      revenue += kg * _effectiveReliability(d, st) * d.basePricePerKg;
+    }
+    return (revenue * 0.10 * _pathIncomeMultiplier).round();
+  }
+
+  double get _projectedGeneratedPoliceHeat {
+    double heat = 0;
+    for (final d in kDistributors) {
+      final kg = allocated[d.id] ?? 0;
+      if (kg > 0) heat += kg * exposureHeatPerKg(d.exposure);
+    }
+    if (allocatedKg > stashKg * 0.85) heat += 4;
+    return heat * (1 + policeHeatTierIndex(policeHeat) * 0.15);
+  }
+
+  /// Net projected police-heat swing this month (generated minus the
+  /// baseline cooldown) — shown next to [projectedTake] so "one more sale"
+  /// reads against what it costs.
+  double get projectedPoliceHeatDelta => _projectedGeneratedPoliceHeat - 3;
+
+  double get _projectedGeneratedRivalPressure {
+    double rival = 0;
+    for (final d in kDistributors) {
+      final st = distributorState[d.id];
+      if (st == null) continue;
+      final wanted = st.orderKg;
+      if (wanted <= 0) continue;
+      final allocatedForThis = allocated[d.id] ?? 0;
+      final unmet = (wanted * 0.85 - allocatedForThis).clamp(0, wanted);
+      rival += unmet * 0.08;
+    }
+    return rival * (1 + rivalTierIndex(rivalPressure) * 0.15);
+  }
+
+  double get projectedRivalPressureDelta => _projectedGeneratedRivalPressure - 1.5;
+
+  /// Coarse risk read for the whole allocation — driven by how much of the
+  /// stash is riding on high/medium-exposure distributors.
+  String get projectedDistributorRisk {
+    if (allocatedKg == 0) return 'NONE';
+    double weighted = 0;
+    for (final d in kDistributors) {
+      final kg = allocated[d.id] ?? 0;
+      weighted += kg * exposureHeatPerKg(d.exposure);
+    }
+    final avg = weighted / allocatedKg;
+    if (avg < 0.05) return 'LOW';
+    if (avg < 0.09) return 'MEDIUM';
+    return 'HIGH';
+  }
+
+  // Buffered so mid-month heat/rival swings (a situation answered, an
+  // incursion put down, a crew member disciplined) still show up with their
+  // reason on the next month-resolution card instead of changing silently.
+  final List<MeterDelta> _pendingEventMeterDeltas = [];
+  bool _forceTroubleNextMonth = false;
+  String? lastSituationOutcome;
+
+  void _rollNextSituation() {
+    if (_forcedNextSituation != null) {
+      pendingSituation = _forcedNextSituation;
+      pendingSituationDistributorId = _forcedNextSituationDistributorId;
+      _lastSituationId = pendingSituation!.id;
+      _forcedNextSituation = null;
+      _forcedNextSituationDistributorId = null;
+      return;
+    }
+    final pool = kMonthlySituations.where((s) => !s.forcedOnly).toList();
+    MonthlySituation picked;
+    do {
+      picked = pool[_rng.nextInt(pool.length)];
+    } while (pool.length > 1 && picked.id == _lastSituationId);
+    pendingSituation = picked;
+    _lastSituationId = picked.id;
+    pendingSituationDistributorId = picked.needsDistributor ? kDistributors[_rng.nextInt(kDistributors.length)].id : null;
+  }
+
+  void respondSituation(String optionId) {
+    final situation = pendingSituation;
+    if (situation == null) return;
+    final option = situation.options.firstWhere((o) => o.id == optionId, orElse: () => situation.options.first);
+    final e = option.effect;
+
+    if (e.cashDelta != 0) cash = (cash + e.cashDelta).clamp(0, 1 << 30);
+    if (e.policeHeatDelta != 0) {
+      policeHeat = _clamp01to100(policeHeat + e.policeHeatDelta);
+      _pendingEventMeterDeltas.add(MeterDelta('POLICE HEAT', e.policeHeatDelta, situation.title));
+    }
+    if (e.rivalPressureDelta != 0) {
+      rivalPressure = _clamp01to100(rivalPressure + e.rivalPressureDelta);
+      _pendingEventMeterDeltas.add(MeterDelta('RIVAL PRESSURE', e.rivalPressureDelta, situation.title));
+    }
+    if (e.stashMultiplier != 1.0) {
+      stashKg = (stashKg * e.stashMultiplier).round().clamp(0, stashKg);
+    }
+    if (e.affectAllCrew && crewNames.isNotEmpty) {
+      for (final n in crewNames) {
+        crewLoyalty[n] = ((crewLoyalty[n] ?? 0.8) + e.crewLoyaltyDelta).clamp(0, 1);
+      }
+    } else if (e.splitCrewLoyalty && crewNames.length >= 2) {
+      final shuffled = List.of(crewNames)..shuffle(_rng);
+      crewLoyalty[shuffled[0]] = ((crewLoyalty[shuffled[0]] ?? 0.8) + e.crewLoyaltyDelta).clamp(0, 1);
+      crewLoyalty[shuffled[1]] = ((crewLoyalty[shuffled[1]] ?? 0.8) - e.crewLoyaltyDelta).clamp(0, 1);
+    } else if (e.crewLoyaltyDelta != 0 && crewNames.isNotEmpty) {
+      final n = crewNames[_rng.nextInt(crewNames.length)];
+      crewLoyalty[n] = ((crewLoyalty[n] ?? 0.8) + e.crewLoyaltyDelta).clamp(0, 1);
+    }
+    if (e.forceTroubleNextMonth) _forceTroubleNextMonth = true;
+
+    if (e.targetDistributor && pendingSituationDistributorId != null) {
+      final d = kDistributors.firstWhere((x) => x.id == pendingSituationDistributorId);
+      final st = distributorState[d.id];
+      if (st != null) {
+        st.trust = (st.trust + e.distributorTrustDelta).clamp(0, 1);
+        if (e.distributorOrderMultiplier != 1.0) {
+          st.orderKg = (st.orderKg * e.distributorOrderMultiplier).round().clamp(5, (d.baseOrderKg * 1.6).round());
+        }
+      }
+      if (e.othersDistributorTrustDelta != 0) {
+        for (final other in kDistributors) {
+          if (other.id == d.id) continue;
+          final otherSt = distributorState[other.id];
+          if (otherSt != null) otherSt.trust = (otherSt.trust + e.othersDistributorTrustDelta).clamp(0, 1);
+        }
+      }
+    }
+    if (e.affectAllDistributors) {
+      for (final d in kDistributors) {
+        final st = distributorState[d.id];
+        if (st == null) continue;
+        st.trust = (st.trust + e.distributorTrustDelta).clamp(0, 1);
+        if (e.distributorOrderMultiplier != 1.0) {
+          st.orderKg = (st.orderKg * e.distributorOrderMultiplier).round().clamp(5, (d.baseOrderKg * 1.6).round());
+        }
+      }
+    }
+
+    lastSituationOutcome = fillSituationText(option.effect.resultNote);
+    pendingSituation = null;
+    pendingSituationDistributorId = null;
+    _maybeStartLevel4Gap();
+    notifyListeners();
+  }
+
   void closeMonth() {
     if (level != 4 || level4Busy) return;
-    if (pendingIncursion != null || pendingTrouble != null) return;
+    if (pendingIncursion != null || pendingTrouble != null || pendingSituation != null) return;
+
+    final deltas = <MeterDelta>[..._pendingEventMeterDeltas];
+    _pendingEventMeterDeltas.clear();
+    final deliveries = <DeliveryResult>[];
+    final notes = <String>[];
+    double distributionHeat = 0;
+    double neglectRival = 0;
+
+    final heatMultiplier = 1 + policeHeatTierIndex(policeHeat) * 0.15;
+    final rivalMultiplier = 1 + rivalTierIndex(rivalPressure) * 0.15;
+    final totalAllocated = allocatedKg;
     double revenue = 0;
-    for (final entry in allocated.entries) {
-      final d = kDistributors.firstWhere((x) => x.id == entry.key);
-      revenue += entry.value * d.pricePerKg;
+
+    for (final d in kDistributors) {
+      final allocatedForThis = allocated[d.id] ?? 0;
+      final st = distributorState.putIfAbsent(d.id, () => DistributorRuntime(orderKg: d.baseOrderKg));
+      final wanted = st.orderKg;
+
+      int deliveredKg = 0;
+      int paid = 0;
+      String note;
+      if (allocatedForThis <= 0) {
+        note = wanted > 0 ? 'Got nothing this month' : 'Nothing ordered';
+      } else {
+        final reliability = _effectiveReliability(d, st);
+        final noise = (_rng.nextDouble() - 0.5) * (1 - reliability);
+        final fraction = (reliability + noise).clamp(0.4, 1.0);
+        deliveredKg = (allocatedForThis * fraction).round().clamp(0, allocatedForThis);
+        paid = (deliveredKg * d.basePricePerKg).round();
+        revenue += paid;
+        note = deliveredKg >= allocatedForThis ? 'Paid in full' : 'Short by ${allocatedForThis - deliveredKg} KG';
+        distributionHeat += allocatedForThis * exposureHeatPerKg(d.exposure);
+      }
+
+      // Trust/order drift is driven by how the allocation compares to what
+      // this distributor actually wanted — not by the delivery roll above.
+      if (wanted > 0) {
+        final satisfiedFraction = (allocatedForThis / wanted).clamp(0.0, 2.0);
+        if (satisfiedFraction >= 0.85) {
+          st.trust = (st.trust + 0.04).clamp(0, 1);
+          st.neglectStreak = 0;
+          if (st.chainStage > 0) st.chainStage -= 1;
+          st.orderKg = (st.orderKg + (d.baseOrderKg * d.growth * st.trust * 0.3)).round().clamp(5, (d.baseOrderKg * 1.6).round());
+          // Overloading beyond comfort still pays out today — the strain on
+          // trust is the cost that shows up later, not now.
+          final excess = allocatedForThis - wanted;
+          if (excess > wanted * 0.2) {
+            final strain = (excess / wanted).clamp(0.0, 1.5);
+            st.trust = (st.trust - strain * 0.06).clamp(0, 1);
+          }
+        } else {
+          final deficit = 1 - satisfiedFraction;
+          st.trust = (st.trust - deficit * 0.15).clamp(0, 1);
+          st.neglectStreak += 1;
+          st.orderKg = (st.orderKg - (d.baseOrderKg * 0.1)).round().clamp(5, (d.baseOrderKg * 1.6).round());
+          neglectRival += (wanted * 0.85 - allocatedForThis).clamp(0, wanted) * 0.08;
+          if (st.neglectStreak >= 2 && st.chainStage == 0) {
+            st.chainStage = 1;
+            _forcedNextSituation = kMonthlySituations.firstWhere((s) => s.id == 'distributor_pressure');
+            _forcedNextSituationDistributorId = d.id;
+          } else if (st.neglectStreak >= 3 && st.chainStage == 1) {
+            st.chainStage = 2;
+            st.trust = (st.trust - 0.2).clamp(0, 1);
+            neglectRival += 6;
+            notes.add('${d.name} has started supplying $rivalCrewName.');
+          }
+        }
+      }
+
+      deliveries.add(DeliveryResult(distributorName: d.name, orderedKg: wanted, allocatedKg: allocatedForThis, deliveredKg: deliveredKg, paid: paid, note: note));
     }
+
     final take = (revenue * 0.10 * _pathIncomeMultiplier).round();
     cash += take;
     lastMonthTake = take;
     monthsAsLeader += 1;
-    stashKg = 100;
+    final closedMonthStash = stashKg; // this month's actual cap, before it resets below
+    _stashKgBase = 100;
+    stashKg = _stashKgBase;
     allocated.clear();
+
+    if (distributionHeat > 0) {
+      final applied = distributionHeat * heatMultiplier;
+      deltas.add(MeterDelta('POLICE HEAT', applied, 'Moving product through distributors'));
+      policeHeat = _clamp01to100(policeHeat + applied);
+    }
+    if (closedMonthStash > 0 && totalAllocated > closedMonthStash * 0.85) {
+      final applied = 4.0 * heatMultiplier;
+      deltas.add(MeterDelta('POLICE HEAT', applied, 'Pushing excessive supply'));
+      policeHeat = _clamp01to100(policeHeat + applied);
+    }
+    // Heat cools on its own every month — a real recovery option, just a
+    // slow one. Suspicion still creeps up regardless of how careful you
+    // are; moving product at this volume is never fully invisible.
+    deltas.add(const MeterDelta('POLICE HEAT', -3, 'Cooling off'));
+    policeHeat = _clamp01to100(policeHeat - 3);
+    cartelSuspicion = _clamp01to100(cartelSuspicion + 2);
+
+    if (neglectRival > 0) {
+      final applied = neglectRival * rivalMultiplier;
+      deltas.add(MeterDelta('RIVAL PRESSURE', applied, 'Distributors left exposed'));
+      rivalPressure = _clamp01to100(rivalPressure + applied);
+    }
+    deltas.add(const MeterDelta('RIVAL PRESSURE', -1.5, 'Quiet corners'));
+    rivalPressure = _clamp01to100(rivalPressure - 1.5);
+
     // A crew that only hears from a dealmaker or a numbers guy drifts a
     // little every month — Muscle is the one path that's actually around.
-    if (careerPath == 'fixer' || careerPath == 'boss') {
+    final crewNotes = <String>[];
+    if ((careerPath == 'fixer' || careerPath == 'boss') && crewNames.isNotEmpty) {
       for (final n in crewNames) {
         crewLoyalty[n] = ((crewLoyalty[n] ?? 0.8) - 0.03).clamp(0, 1);
       }
+      crewNotes.add('Crew loyalty -3% — drifting without you around.');
     }
-    // Heat cools slower now — a violent month lingers instead of washing out
-    // by the next one. Suspicion creeps up a little every month regardless
-    // of how careful you are; moving product at this volume is never fully invisible.
-    policeHeat = _clamp01to100(policeHeat - 3);
-    cartelSuspicion = _clamp01to100(cartelSuspicion + 2);
+
+    pendingMonthResolution = MonthResolution(
+      monthNumber: monthsAsLeader,
+      take: take,
+      deliveries: deliveries,
+      crewNotes: crewNotes,
+      meterDeltas: deltas,
+      notes: notes,
+    );
 
     if (take < 65000) {
       shortMonths += 1;
@@ -1570,12 +1910,17 @@ class CareerController extends ChangeNotifier {
 
     // Trouble and an incursion can both land the same month — reckless crew
     // and hungry rivals don't wait for a convenient week. Muscle keeps a
-    // tighter leash on the crew, so trouble is rarer for that path.
-    if (_rng.nextDouble() < (careerPath == 'muscle' ? 0.30 : 0.45) && crewNames.isNotEmpty) {
+    // tighter leash on the crew, so trouble is rarer for that path. Both
+    // grow more likely the hotter police and rivals already are.
+    final combinedTier = policeHeatTierIndex(policeHeat) + rivalTierIndex(rivalPressure);
+    final troubleChance = ((careerPath == 'muscle' ? 0.22 : 0.35) + combinedTier * 0.015).clamp(0.0, 0.75);
+    if ((_forceTroubleNextMonth || _rng.nextDouble() < troubleChance) && crewNames.isNotEmpty) {
       pendingTrouble = crewNames[_rng.nextInt(crewNames.length)];
       recentStoryEvent = 'crew_trouble';
     }
-    if (_rng.nextDouble() < 0.45) {
+    _forceTroubleNextMonth = false;
+    final incursionChance = (0.30 + rivalTierIndex(rivalPressure) * 0.05).clamp(0.0, 0.7);
+    if (_rng.nextDouble() < incursionChance) {
       pendingIncursion = '$rivalCrewName is testing your corner on the east side.';
       recentStoryEvent ??= 'incursion'; // don't overwrite crew_trouble if both land
       rivalPressure = _clamp01to100(rivalPressure + 15);
@@ -1583,14 +1928,26 @@ class CareerController extends ChangeNotifier {
     if (pendingTrouble == null && pendingIncursion == null && monthsAsLeader >= kMonthsAsLeaderToPromote) {
       promotionAvailable = true;
     }
+    _rollNextSituation();
     _maybeStartLevel4Gap();
+    notifyListeners();
+  }
+
+  void acknowledgeMonthResolution() {
+    pendingMonthResolution = null;
+    notifyListeners();
+  }
+
+  void dismissSituationOutcome() {
+    if (lastSituationOutcome == null) return;
+    lastSituationOutcome = null;
     notifyListeners();
   }
 
   // The gap only starts once nothing is left to resolve — a freshly rolled
   // crisis must stay answerable right away, never locked behind a cooldown.
   void _maybeStartLevel4Gap() {
-    if (pendingIncursion == null && pendingTrouble == null) _startLevel4Gap();
+    if (pendingIncursion == null && pendingTrouble == null && pendingSituation == null) _startLevel4Gap();
   }
 
   void respondIncursion(String choice) {
@@ -1600,10 +1957,13 @@ class CareerController extends ChangeNotifier {
       policeHeat = _clamp01to100(policeHeat + 25);
       cartelSuspicion = _clamp01to100(cartelSuspicion - 10);
       rivalPressure = _clamp01to100(rivalPressure - 20);
+      _pendingEventMeterDeltas.add(const MeterDelta('POLICE HEAT', 25, 'Sent guys with guns'));
+      _pendingEventMeterDeltas.add(const MeterDelta('RIVAL PRESSURE', -20, 'Sent guys with guns'));
     } else {
       cash = (cash - (2000 * _pathNegotiationCostMultiplier).round()).clamp(0, 1 << 30);
       cartelSuspicion = _clamp01to100(cartelSuspicion + 5);
       rivalPressure = _clamp01to100(rivalPressure - 8);
+      _pendingEventMeterDeltas.add(const MeterDelta('RIVAL PRESSURE', -8, 'Paid off an incursion'));
     }
     pendingIncursion = null;
     if (pendingTrouble == null && monthsAsLeader >= kMonthsAsLeaderToPromote) promotionAvailable = true;
@@ -1618,6 +1978,7 @@ class CareerController extends ChangeNotifier {
       // Muscle knows how to send a message without losing the room.
       crewLoyalty[name] = ((crewLoyalty[name] ?? 0.8) - (careerPath == 'muscle' ? 0.075 : 0.15)).clamp(0, 1);
       policeHeat = _clamp01to100(policeHeat + 4);
+      _pendingEventMeterDeltas.add(const MeterDelta('POLICE HEAT', 4, 'Disciplined the crew'));
     } else {
       crewNames.remove(name);
       crewLoyalty.remove(name);
@@ -1629,6 +1990,48 @@ class CareerController extends ChangeNotifier {
     pendingTrouble = null;
     if (pendingIncursion == null && monthsAsLeader >= kMonthsAsLeaderToPromote) promotionAvailable = true;
     _maybeStartLevel4Gap();
+    notifyListeners();
+  }
+
+  /// What [reducePoliceHeat] would currently cost — read by the UI.
+  int get policeHeatReliefCost => max(1500, (cash * 0.06).round());
+
+  /// Proactive, low-profile heat relief — the police-heat mirror of
+  /// [payOffRival]. Always on offer on the Territory tab so a hot month has
+  /// a real way back down instead of just waiting it out.
+  void reducePoliceHeat() {
+    if (policeHeat <= 0) return;
+    final cost = policeHeatReliefCost;
+    if (cash < cost) return;
+    cash -= cost;
+    policeHeat = _clamp01to100(policeHeat - 18);
+    notifyListeners();
+  }
+
+  /// Spends cash to steady the whole crew at once — the Crew-tab equivalent
+  /// of [payOffRival]/[reducePoliceHeat], for when loyalty (not heat or
+  /// rivals) is the thing sliding.
+  void reassureCrew() {
+    if (crewNames.isEmpty) return;
+    const cost = 1000;
+    if (cash < cost) return;
+    cash -= cost;
+    for (final n in crewNames) {
+      crewLoyalty[n] = ((crewLoyalty[n] ?? 0.8) + 0.05).clamp(0, 1);
+    }
+    notifyListeners();
+  }
+
+  /// Spends cash to rebuild trust with one distributor directly, outside of
+  /// a situation or chain reaction — the one lever that repairs a
+  /// relationship a bad month damaged, on the player's own schedule.
+  void reassureDistributor(String id) {
+    final st = distributorState[id];
+    if (st == null) return;
+    const cost = 1200;
+    if (cash < cost) return;
+    cash -= cost;
+    st.trust = (st.trust + 0.12).clamp(0, 1);
     notifyListeners();
   }
 

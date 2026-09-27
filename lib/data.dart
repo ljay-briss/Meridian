@@ -443,17 +443,242 @@ const List<String> kExcuses = [
 
 // ── Level 4: Cell Leader ─────────────────────────────────────────────────
 
+/// How much heat a kilo pushed through a distributor generates — separate
+/// from price/reliability so a cheap, safe connect and an expensive, risky
+/// one can both exist without one strictly dominating the other.
+enum ExposureLevel { low, medium, high }
+
+String exposureLabel(ExposureLevel e) {
+  switch (e) {
+    case ExposureLevel.low:
+      return 'LOW';
+    case ExposureLevel.medium:
+      return 'MEDIUM';
+    case ExposureLevel.high:
+      return 'HIGH';
+  }
+}
+
+/// Heat generated per KG pushed through a distributor at this exposure tier
+/// — read by [CareerController.closeMonth]. Kept here (not baked into the
+/// static [Distributor] price) so every exposure tier tunes from one place.
+double exposureHeatPerKg(ExposureLevel e) {
+  switch (e) {
+    case ExposureLevel.low:
+      return 0.035;
+    case ExposureLevel.medium:
+      return 0.07;
+    case ExposureLevel.high:
+      return 0.13;
+  }
+}
+
+/// A Level 4 buyer's static profile. Add more here to expand the roster —
+/// [CareerController] tracks each one's live trust/order/chain state
+/// separately (see CareerController.distributorState) so this table never
+/// needs touching at runtime.
 class Distributor {
   final String id, name;
-  final double pricePerKg;
-  const Distributor(this.id, this.name, this.pricePerKg);
+  final double basePricePerKg;
+  final int baseOrderKg; // what they want in a normal, undisturbed month
+  final double baseReliability; // 0..1, before heat/rival/trust modifiers
+  final ExposureLevel exposure;
+  final double growth; // 0..1 — how eagerly a satisfied order grows next month
+  const Distributor(this.id, this.name, this.basePricePerKg, this.baseOrderKg, this.baseReliability, this.exposure, this.growth);
 }
 
 const List<Distributor> kDistributors = [
-  Distributor('d1', 'Downtown connect', 6500),
-  Distributor('d2', 'Northside crew', 5800),
-  Distributor('d3', 'Highway distributor', 7200),
+  Distributor('tony', 'Tony', 5800, 40, 0.96, ExposureLevel.low, 0.05),
+  Distributor('marco', 'Marco', 7800, 40, 0.88, ExposureLevel.medium, 0.12),
+  Distributor('rico', 'Rico', 11000, 40, 0.70, ExposureLevel.high, 0.20),
 ];
+
+/// One labeled heat/rival/cash/crew/distributor swing shown on the month
+/// resolution card — [CareerController] never changes a meter silently, it
+/// logs why here instead.
+class MeterDelta {
+  final String label;
+  final double value;
+  final String reason;
+  const MeterDelta(this.label, this.value, this.reason);
+}
+
+/// One distributor's outcome for the month, shown on the resolution card.
+class DeliveryResult {
+  final String distributorName;
+  final int orderedKg;
+  final int allocatedKg;
+  final int deliveredKg;
+  final int paid;
+  final String note;
+  const DeliveryResult({
+    required this.distributorName,
+    required this.orderedKg,
+    required this.allocatedKg,
+    required this.deliveredKg,
+    required this.paid,
+    required this.note,
+  });
+}
+
+/// Full month-close summary — built by [CareerController.closeMonth] and
+/// shown once before the next month opens (see [CareerController.pendingMonthResolution]).
+class MonthResolution {
+  final int monthNumber;
+  final int take;
+  final List<DeliveryResult> deliveries;
+  final List<String> crewNotes;
+  final List<MeterDelta> meterDeltas;
+  final List<String> notes; // chain-reaction / distributor story beats
+  const MonthResolution({
+    required this.monthNumber,
+    required this.take,
+    required this.deliveries,
+    required this.crewNotes,
+    required this.meterDeltas,
+    this.notes = const [],
+  });
+}
+
+/// Numeric consequences of one [SituationOption]. Every field defaults to a
+/// no-op, so a new situation only has to set the handful of fields it needs.
+class SituationEffect {
+  final int cashDelta;
+  final double policeHeatDelta;
+  final double rivalPressureDelta;
+  final double crewLoyaltyDelta; // one random member, unless a split/all flag below fires
+  final bool affectAllCrew;
+  final bool splitCrewLoyalty; // one random member gets +crewLoyaltyDelta, another gets the mirror -crewLoyaltyDelta
+  final bool forceTroubleNextMonth;
+  final double stashMultiplier; // <1 shrinks this month's stash, applied once, immediately
+  final bool targetDistributor; // apply the distributor fields below to the situation's referenced distributor
+  final bool affectAllDistributors;
+  final double distributorTrustDelta;
+  final double distributorOrderMultiplier; // 1.0 = no change
+  final double othersDistributorTrustDelta; // every OTHER distributor, only meaningful with targetDistributor
+  final String resultNote; // shown as immediate feedback once the choice is made
+  const SituationEffect({
+    this.cashDelta = 0,
+    this.policeHeatDelta = 0,
+    this.rivalPressureDelta = 0,
+    this.crewLoyaltyDelta = 0,
+    this.affectAllCrew = false,
+    this.splitCrewLoyalty = false,
+    this.forceTroubleNextMonth = false,
+    this.stashMultiplier = 1.0,
+    this.targetDistributor = false,
+    this.affectAllDistributors = false,
+    this.distributorTrustDelta = 0,
+    this.distributorOrderMultiplier = 1.0,
+    this.othersDistributorTrustDelta = 0,
+    required this.resultNote,
+  });
+}
+
+class SituationOption {
+  final String id;
+  final String label;
+  final String subtext; // short consequence preview, e.g. "-$1,500 · +6 heat"
+  final SituationEffect effect;
+  const SituationOption(this.id, this.label, this.subtext, this.effect);
+}
+
+/// One meaningful monthly decision point. [body]/[SituationOption.subtext]
+/// may contain `{rival}` (the run's rival crew name) or, when
+/// [needsDistributor] is true, `{distributor}` (picked fresh each time this
+/// situation is rolled — see CareerController._rollSituation). Add more to
+/// [kMonthlySituations] to expand the pool; nothing else needs to change.
+class MonthlySituation {
+  final String id;
+  final String title;
+  final String body;
+  final List<SituationOption> options;
+  final bool needsDistributor;
+  final bool forcedOnly; // only ever rolled deliberately (chain reactions), never by the random monthly pick
+  const MonthlySituation(this.id, this.title, this.body, this.options, {this.needsDistributor = false, this.forcedOnly = false});
+}
+
+const List<MonthlySituation> kMonthlySituations = [
+  MonthlySituation('rival_push', 'RIVAL PUSH', '{rival} has started undercutting your distributors, offering better terms to peel them away.', [
+    SituationOption('hold', 'Hold your price', 'Free — but they keep circling', SituationEffect(rivalPressureDelta: 6, resultNote: 'You held firm. {rival} keeps circling.')),
+    SituationOption('push_out', 'Push them out', '-\$1,500 · +6 police heat', SituationEffect(cashDelta: -1500, policeHeatDelta: 6, rivalPressureDelta: -10, resultNote: 'You sent a message. It wasn\'t quiet.')),
+    SituationOption('pay_loyal', 'Pay distributors to stay loyal', '-\$1,200 · steadies trust', SituationEffect(cashDelta: -1200, affectAllDistributors: true, distributorTrustDelta: 0.08, resultNote: 'A little extra kept everyone happy this month.')),
+  ]),
+  MonthlySituation('police_presence', 'POLICE PRESENCE', 'Patrols have increased around several of your corners.', [
+    SituationOption('lay_low', 'Lay low', 'Smaller month · -10 heat', SituationEffect(policeHeatDelta: -10, stashMultiplier: 0.8, resultNote: 'You kept it small. Fewer eyes, less product moved.')),
+    SituationOption('keep_operating', 'Keep operating', 'No change', SituationEffect(resultNote: 'Business as usual — for now.')),
+    SituationOption('push_harder', 'Push harder', '+12 heat · bigger orders', SituationEffect(policeHeatDelta: 12, affectAllDistributors: true, distributorOrderMultiplier: 1.15, resultNote: 'You leaned in. Demand jumped — so did the risk.')),
+  ]),
+  MonthlySituation('crew_dispute', 'CREW DISPUTE', 'Two of your guys are fighting over territory.', [
+    SituationOption('mediate', 'Mediate', 'Steadies the whole crew', SituationEffect(affectAllCrew: true, crewLoyaltyDelta: 0.03, resultNote: 'You talked them down. Cooler heads, for now.')),
+    SituationOption('back_one_side', 'Back one side', 'One owes you · one doesn\'t forget', SituationEffect(splitCrewLoyalty: true, crewLoyaltyDelta: 0.1, resultNote: 'One man got what he wanted. The other\'s still sore.')),
+    SituationOption('ignore', 'Ignore it', 'Risk of it boiling over', SituationEffect(forceTroubleNextMonth: true, resultNote: 'You let it go. It didn\'t go away.')),
+  ]),
+  MonthlySituation(
+    'distributor_demand',
+    'DISTRIBUTOR DEMAND',
+    '{distributor} wants more supply this month — a real order, if you can cover it.',
+    [
+      SituationOption('give_priority', 'Give them priority', 'Their order jumps · others notice', SituationEffect(targetDistributor: true, distributorOrderMultiplier: 1.4, distributorTrustDelta: 0.05, othersDistributorTrustDelta: -0.03, resultNote: '{distributor} got what they asked for. The others noticed.')),
+      SituationOption('spread_supply', 'Spread the supply', 'No favorites', SituationEffect(resultNote: 'You kept it even-handed.')),
+      SituationOption('refuse', 'Refuse the deal', 'Their trust takes a hit', SituationEffect(targetDistributor: true, distributorTrustDelta: -0.12, distributorOrderMultiplier: 0.85, resultNote: '{distributor} didn\'t like hearing no.')),
+    ],
+    needsDistributor: true,
+  ),
+  MonthlySituation('quiet_month', 'QUIET MONTH', 'Nothing\'s moving against you this month — for once.', [
+    SituationOption('stay_sharp', 'Stay sharp, keep it lean', 'Eases heat and rivals off you', SituationEffect(policeHeatDelta: -6, rivalPressureDelta: -6, resultNote: 'You used the quiet to breathe.')),
+    SituationOption('capitalize', 'Capitalize — push volume', 'More demand this month · +heat', SituationEffect(affectAllDistributors: true, distributorOrderMultiplier: 1.2, policeHeatDelta: 4, resultNote: 'You made the most of the calm.')),
+  ]),
+  MonthlySituation('supply_delay', 'SUPPLY DELAY', 'This month\'s shipment came in light — something got held up on the way.', [
+    SituationOption('absorb', 'Absorb it quietly', 'Smaller stash, no drama', SituationEffect(stashMultiplier: 0.75, resultNote: 'You made do with less.')),
+    SituationOption('lean_on_crew', 'Lean on the crew to cover the gap', 'Costs loyalty · stash holds', SituationEffect(affectAllCrew: true, crewLoyaltyDelta: -0.05, resultNote: 'You pushed the crew to cover the shortfall.')),
+  ]),
+  // Forced-only — never rolled by the normal monthly pick, only fired by
+  // CareerController when a neglected distributor's patience runs out (see
+  // DistributorRuntime.chainStage). This is what makes month 3's decision
+  // still cost something in month 5.
+  MonthlySituation(
+    'distributor_pressure',
+    'DISTRIBUTOR PRESSURE',
+    '{distributor} says they\'re done being an afterthought. Square it now, or take your chances.',
+    [
+      SituationOption('pay_upfront', 'Pay them up front to stay', '-\$2,500 · rebuilds trust', SituationEffect(cashDelta: -2500, targetDistributor: true, distributorTrustDelta: 0.25, resultNote: '{distributor} took the money. For now, you\'re square.')),
+      SituationOption('call_bluff', 'Call their bluff', 'Free — they might walk', SituationEffect(targetDistributor: true, distributorTrustDelta: -0.1, resultNote: '{distributor} didn\'t blink. Neither did you.')),
+    ],
+    needsDistributor: true,
+    forcedOnly: true,
+  ),
+];
+
+/// Named police-heat bands — thresholds match [CareerController]'s
+/// month-close math (see policeHeatTierIndex). Index 0..5.
+const List<String> kPoliceHeatTierLabels = ['LOW HEAT', 'WATCHED', 'ACTIVE INVESTIGATION', 'HEAVY PRESSURE', 'CRACKDOWN', 'CRITICAL'];
+
+int policeHeatTierIndex(double heat) {
+  if (heat < 20) return 0;
+  if (heat < 40) return 1;
+  if (heat < 60) return 2;
+  if (heat < 80) return 3;
+  if (heat < 95) return 4;
+  return 5;
+}
+
+String policeHeatTierLabel(double heat) => kPoliceHeatTierLabels[policeHeatTierIndex(heat)];
+
+/// Named rival-pressure bands — same shape as the police heat tiers above,
+/// so the two read as parallel, comparable threats.
+const List<String> kRivalTierLabels = ['QUIET', 'WATCHING', 'ENCROACHING', 'ACTIVE RIVALRY', 'TERRITORY WAR', 'CRITICAL'];
+
+int rivalTierIndex(double pressure) {
+  if (pressure < 20) return 0;
+  if (pressure < 40) return 1;
+  if (pressure < 60) return 2;
+  if (pressure < 80) return 3;
+  if (pressure < 95) return 4;
+  return 5;
+}
+
+String rivalTierLabel(double pressure) => kRivalTierLabels[rivalTierIndex(pressure)];
 
 const List<String> kCrewTroubleEvents = [
   '{name} got high on the product and mouthed off in public.',
