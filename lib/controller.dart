@@ -1573,7 +1573,7 @@ class CareerController extends ChangeNotifier {
   /// chain-reaction penalty from having been lost to a rival (see
   /// [_resolveDelivery]).
   int demandFor(String id) {
-    final d = kDistributors.firstWhere((x) => x.id == id);
+    final d = kDistributors.firstWhere((x) => x.id == id, orElse: () => kDistributors.first);
     final base = max(0, d.baseDemandKg + (distributorDemandBonus[id] ?? 0));
     return distributorLostToRival.contains(id) ? (base * 0.5).round() : base;
   }
@@ -1802,18 +1802,25 @@ class CareerController extends ChangeNotifier {
       detail = '$detail — and word is they\'re talking to $rivalCrewName now';
     }
 
-    // The cost of having done business with them at all this month.
+    // The cost of having done business with them at all this month — always
+    // applied (matching what projectedOutcome promised before the player
+    // committed); only logged as a reason once it's big enough to be worth
+    // reading, so the card doesn't fill up with noise-level line items.
     final hw = _exposureHeatWeight(d.exposure);
     final h = (normal * hw + excess * hw * 2) * _heatSelfFeedMultiplier();
-    if (h >= 0.4) {
+    if (h > 0) {
       policeHeat = _clamp01to100(policeHeat + h);
-      heatReasons.add(HeatReason('${d.name} — ${d.exposure == DistributorExposure.high ? 'high-risk' : 'active'} distribution', h));
+      if (h >= 0.4) {
+        heatReasons.add(HeatReason('${d.name} — ${d.exposure == DistributorExposure.high ? 'high-risk' : 'active'} distribution', h));
+      }
     }
     if (excess > 0) {
       final rv = excess * _exposureRivalWeight(d.exposure);
-      if (rv >= 0.4) {
+      if (rv > 0) {
         rivalPressure = _clamp01to100(rivalPressure + rv);
-        rivalReasons.add(HeatReason('Flooded ${d.name}\'s market past what they wanted', rv));
+        if (rv >= 0.4) {
+          rivalReasons.add(HeatReason('Flooded ${d.name}\'s market past what they wanted', rv));
+        }
       }
     }
 

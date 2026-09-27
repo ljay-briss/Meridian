@@ -138,7 +138,7 @@ class _SituationCard extends StatelessWidget {
           ])
         else
           Text(
-            _filledResult(situation.options.firstWhere((o) => o.id == chosen).resultLine, g),
+            _filledResult(situation.options.firstWhere((o) => o.id == chosen, orElse: () => situation.options.last).resultLine, g),
             style: AppText.sans(size: 13, weight: FontWeight.w500, color: c.inkSoft, height: 1.4),
           ),
       ]),
